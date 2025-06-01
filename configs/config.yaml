@@ -1,0 +1,21 @@
+train:
+    batch_size: 32
+    num_epochs: 100
+    learning_rate: 0.001
+    weight_decay: 0.0001
+    device: cuda
+    num_workers: 4
+data:
+    train_path: ../Datasets/EVTOL
+    val_path: ../Datasets/EVTOL
+    test_path: ../Datasets/EVTOL
+    abnormal_path: ../Datasets/EVTOL
+
+model:
+    name: "LSTM"
+    pretrained: true
+
+logging:
+    log_dir: ../logs
+    save_dir: ../checkpoints
+    log_interval: 10
