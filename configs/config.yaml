@@ -1,19 +1,46 @@
 train:
-    batch_size: 32
+    batch_size: 256
     num_epochs: 100
     learning_rate: 0.001
     weight_decay: 0.0001
     device: cuda
     num_workers: 4
+    scheduler_mode: min
+    scheduler_factor: 0.5
+    scheduler_patience: 5
+    scheduler_verbose: true
+    grad_clip: 1.0
+    model_save_path: checkpoints/best_model.pth
+    early_stopping_patience: 10
+
 data:
-    train_path: ../Datasets/EVTOL
-    val_path: ../Datasets/EVTOL
-    test_path: ../Datasets/EVTOL
-    abnormal_path: ../Datasets/EVTOL
+    path: Datasets/test
+    sequence_length: 30
+    prediction_steps: 1
+    train_ratio: 0.5
+    val_ratio: 0.5
+    feature_columns: ["Ecell_V", "I_mA", "EnergyCharge_W_h", "QCharge_mA_h", "EnergyDischarge_W_h", "QDischarge_mA_h", "Temperature__C"]
 
 model:
     name: "LSTM"
     pretrained: true
+    hidden_size: 128
+    num_layers: 2
+    # 可以测的特征：
+    #     Ecell_V 电池电压
+    #     I_mA 电流
+    #     EnergyCharge_W_h 充电能量
+    #     QCharge_mA_h 充电容量
+    #     EnergyDischarge_W_h 放电能量
+    #     QDischarge_mA_h 放电容量
+    #     TemperatureC 温度
+    #     cycleNumber 循环次数
+    prediction_targets: ["Ecell_V"]
+    dropout: 0.2
+    use_multi_task: true
+    prediction_steps: 1
+    head_hidden_size: 64
+    padding_value: 0
 
 logging:
     log_dir: ../logs
