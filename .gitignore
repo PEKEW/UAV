@@ -44,3 +44,7 @@ Thumbs.db
 
 temp/
 *.npy
+
+.cursorrules
+*.png
+*.json
