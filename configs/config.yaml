@@ -41,6 +41,11 @@ model:
     prediction_steps: 1
     head_hidden_size: 64
     padding_value: 0
+    use_uncertainty: true
+    uncertainty_method: "variance"
+    confidence_level: 0.95
+    mc_dropout_samples: 100
+
 
 logging:
     log_dir: ../logs

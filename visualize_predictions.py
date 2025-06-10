@@ -43,22 +43,48 @@ def load_test_data(data_path, config):
     )
     return dataset
 
-def generate_predictions(model, dataset, device='cpu', batch_size=256):
+def generate_predictions(model, dataset, device='cpu', batch_size=256, use_uncertainty=False):
     model.eval()
     model.to(device)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     predictions = []
     targets = []
+    uncertainties = []
     
     with torch.no_grad():
         for batch_x, batch_y in tqdm(dataloader, desc='Prediction Progress'):
             batch_x = batch_x.to(device)
-            outputs = model(batch_x)
-            if isinstance(outputs, dict):
-                pred_key = list(outputs.keys())[0]
-                pred = outputs[pred_key].cpu().numpy()
+            
+            if use_uncertainty and hasattr(model, 'use_uncertainty') and model.use_uncertainty:
+                # 使用置信区间预测
+                outputs = model.predict_with_confidence(batch_x, confidence_level=0.95)
+                if isinstance(outputs, dict):
+                    if model.use_multi_task:
+                        pred_key = list(model.prediction_targets)[0]
+                        pred = outputs[pred_key]['prediction'].cpu().numpy()
+                        std = outputs[pred_key]['std'].cpu().numpy()
+                    else:
+                        pred = outputs['prediction'].cpu().numpy()
+                        std = outputs['std'].cpu().numpy()
+                    uncertainties.extend(std)
+                else:
+                    pred = outputs.cpu().numpy()
+                    uncertainties.extend(np.zeros_like(pred))
             else:
-                pred = outputs.cpu().numpy()
+                # 标准预测
+                outputs = model(batch_x)
+                if isinstance(outputs, dict):
+                    pred_key = list(outputs.keys())[0]
+                    if isinstance(outputs[pred_key], dict):
+                        pred = outputs[pred_key]['prediction'].cpu().numpy()
+                        std = outputs[pred_key].get('std', torch.zeros_like(outputs[pred_key]['prediction'])).cpu().numpy()
+                        uncertainties.extend(std)
+                    else:
+                        pred = outputs[pred_key].cpu().numpy()
+                        uncertainties.extend(np.zeros_like(pred))
+                else:
+                    pred = outputs.cpu().numpy()
+                    uncertainties.extend(np.zeros_like(pred))
             
             if len(batch_y.shape) == 3:
                 # TODO 这里默认第一个是电压
@@ -70,7 +96,8 @@ def generate_predictions(model, dataset, device='cpu', batch_size=256):
     
     predictions = np.array(predictions)
     targets = np.array(targets)
-    return predictions, targets
+    uncertainties = np.array(uncertainties)
+    return predictions, targets, uncertainties
 
 def calculate_metrics(predictions, targets):
     pred_flat = predictions.flatten()
@@ -86,7 +113,7 @@ def calculate_metrics(predictions, targets):
         'R^2': r2
     }
 
-def plot_predictions(predictions, targets, config, save_path='prediction_comparison.png'):
+def plot_predictions(predictions, targets, config, uncertainties=None, save_path='prediction_comparison.png'):
     sns.set_style("whitegrid")
     fig, axes = plt.subplots(2, 2, figsize=(15, 12))
     fig.suptitle('Battery Voltage Prediction Comparison Analysis', fontsize=16, fontweight='bold')
@@ -97,6 +124,16 @@ def plot_predictions(predictions, targets, config, save_path='prediction_compari
     x_axis = np.arange(n_points)
     axes[0, 0].plot(x_axis, target_flat[:n_points], 'b-', label='True Values', alpha=0.7, linewidth=1.5)
     axes[0, 0].plot(x_axis, pred_flat[:n_points], 'r-', label='Predictions', alpha=0.7, linewidth=1.5)
+    
+    # 添加置信区间
+    if uncertainties is not None:
+        uncert_flat = uncertainties.flatten()
+        z_score = 1.96  # 95%置信区间
+        lower_bound = pred_flat - z_score * uncert_flat
+        upper_bound = pred_flat + z_score * uncert_flat
+        axes[0, 0].fill_between(x_axis, lower_bound[:n_points], upper_bound[:n_points], 
+                               alpha=0.2, color='red', label='95% 置信区间')
+    
     axes[0, 0].set_title('Time Series Comparison (First 1000 Points)')
     axes[0, 0].set_xlabel('Time Steps')
     axes[0, 0].set_ylabel('Battery Voltage (V)')
@@ -142,7 +179,29 @@ def plot_predictions(predictions, targets, config, save_path='prediction_compari
     Sequence Length: {config['data']['sequence_length']}
     Prediction Steps: {config['data']['prediction_steps']}
     Prediction Targets: {config['model']['prediction_targets']}
+    Use Uncertainty: {config['model'].get('use_uncertainty', False)}
+    Uncertainty Method: {config['model'].get('uncertainty_method', 'N/A')}
     """
+    
+    # 添加不确定性统计信息
+    if uncertainties is not None:
+        uncert_flat = uncertainties.flatten()
+        # 计算置信区间覆盖率
+        z_score = 1.96
+        lower_bound = pred_flat - z_score * uncert_flat
+        upper_bound = pred_flat + z_score * uncert_flat
+        in_interval = (target_flat >= lower_bound) & (target_flat <= upper_bound)
+        coverage_rate = np.mean(in_interval)
+        
+        uncertainty_text = f"""
+    Uncertainty Statistics:
+    Mean Uncertainty: {uncert_flat.mean():.4f}
+    Uncertainty Std: {uncert_flat.std():.4f}
+    95% Coverage Rate: {coverage_rate*100:.2f}%
+    Uncertainty Range: [{uncert_flat.min():.4f}, {uncert_flat.max():.4f}]
+        """
+        metric_text += uncertainty_text
+    
     axes[1, 1].text(0.1, 0.9, metric_text, transform=axes[1, 1].transAxes, 
                     fontsize=11, verticalalignment='top', 
                     bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
@@ -151,7 +210,7 @@ def plot_predictions(predictions, targets, config, save_path='prediction_compari
     print(f"Chart saved to: {save_path}")
     return metrics
 
-def plot_detailed_comparison(predictions, targets, save_path='detailed_comparison.png'):
+def plot_detailed_comparison(predictions, targets, uncertainties=None, save_path='detailed_comparison.png'):
     fig, axes = plt.subplots(3, 1, figsize=(15, 12))
     fig.suptitle('Detailed Prediction Analysis', fontsize=16, fontweight='bold')
     pred_flat = predictions.flatten()
@@ -162,6 +221,16 @@ def plot_detailed_comparison(predictions, targets, save_path='detailed_compariso
     axes[0].plot(x_detail, pred_flat[:n_detail], 'r--', label='Predictions', linewidth=2)
     axes[0].fill_between(x_detail, target_flat[:n_detail], pred_flat[:n_detail], 
                         alpha=0.3, color='yellow', label='Error Area')
+    
+    # 添加置信区间
+    if uncertainties is not None:
+        uncert_flat = uncertainties.flatten()
+        z_score = 1.96  # 95%置信区间
+        lower_bound = pred_flat - z_score * uncert_flat
+        upper_bound = pred_flat + z_score * uncert_flat
+        axes[0].fill_between(x_detail, lower_bound[:n_detail], upper_bound[:n_detail], 
+                           alpha=0.2, color='red', label='95% 置信区间')
+    
     axes[0].set_title('Local Detailed Comparison (First 500 Points)')
     axes[0].set_xlabel('Time Steps')
     axes[0].set_ylabel('Battery Voltage (V)')
@@ -223,15 +292,21 @@ def main():
     
     test_dataset = load_test_data(args.data, config)
     
-    predictions, targets = generate_predictions(model, test_dataset, device)
+    # 检查是否启用不确定性
+    use_uncertainty = config['model'].get('use_uncertainty', False)
+    predictions, targets, uncertainties = generate_predictions(
+        model, test_dataset, device, use_uncertainty=use_uncertainty
+    )
     
     metrics = plot_predictions(
         predictions, targets, config, 
+        uncertainties=uncertainties if use_uncertainty else None,
         save_path=output_dir / 'prediction_comparison.png'
     )
     
     plot_detailed_comparison(
         predictions, targets,
+        uncertainties=uncertainties if use_uncertainty else None,
         save_path=output_dir / 'detailed_comparison.png'
     )
     
