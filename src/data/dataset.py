@@ -24,6 +24,88 @@ scale_columns = [
     
 
 
+class BatteryAnomalyDataset(Dataset):
+    def __init__(self, data_path: str, sequence_length: int = 50, 
+                transform=None, is_train: bool = True, file_ids: List[str] = None,
+                classification_mode: bool = True):
+        self.sequence_length = sequence_length
+        self.transform = transform
+        self.is_train = is_train
+        self.data_path = data_path
+        self.classification_mode = classification_mode
+        
+        self.feature_columns = [
+            'Ecell_V', 'I_mA', 'EnergyCharge_W_h', 'QCharge_mA_h',
+            'EnergyDischarge_W_h', 'QDischarge_mA_h', 'Temperature__C'
+        ]
+        self.file_ids = file_ids if file_ids else ['battery_anomaly_dataset']
+        
+        self._preload_data()
+        
+        # 计算序列数并创建索引映射
+        self.sequence_indices = []
+        self.total_sequences = 0
+        
+        self._initialize_sequences()
+        
+        if self.total_sequences == 0:
+            raise ValueError("No valid sequences found in the dataset!")
+    
+    def _preload_data(self):
+        print("预加载电池异常检测数据...")
+        self.data_cache = {}
+        
+        for file_id in self.file_ids:
+            file_path = Path(self.data_path) / f"{file_id}.csv"
+            if not file_path.exists():
+                continue
+                
+            df = pd.read_csv(file_path)
+            self.data_cache[file_id] = df
+    
+    def _initialize_sequences(self):
+        for file_id, df in self.data_cache.items():
+            n_samples = len(df) - self.sequence_length + 1
+            
+            if n_samples > 0:
+                for i in range(n_samples):
+                    self.sequence_indices.append({
+                        'file_id': file_id,
+                        'start_idx': i,
+                        'end_idx': i + self.sequence_length
+                    })
+                self.total_sequences += n_samples
+    
+    def __len__(self) -> int:
+        return self.total_sequences
+    
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        seq_info = self.sequence_indices[idx]
+        df = self.data_cache[seq_info['file_id']]
+        
+        sequence_data = df.iloc[seq_info['start_idx']:seq_info['end_idx']]
+        sequence = sequence_data[self.feature_columns].values
+        
+        if self.classification_mode:
+            # 分类模式：返回序列的最后一个时间步的标签
+            label = sequence_data['label'].iloc[-1]
+            sequence = torch.FloatTensor(sequence)
+            label = torch.LongTensor([label])
+            return sequence, label
+        else:
+            # 回归模式：预测下一个时间步
+            if seq_info['end_idx'] < len(df):
+                target = df.iloc[seq_info['end_idx']]['Ecell_V']
+                sequence = torch.FloatTensor(sequence)
+                target = torch.FloatTensor([target])
+                return sequence, target
+            else:
+                # 如果没有下一个时间步，返回当前时间步
+                target = sequence_data['Ecell_V'].iloc[-1]
+                sequence = torch.FloatTensor(sequence)
+                target = torch.FloatTensor([target])
+                return sequence, target
+
 class EVTOLDataset(Dataset):
     def __init__(self, data_path: str, sequence_length: int = 100, prediction_steps: int = 1, 
                 transform=None, is_train: bool = True, file_ids: List[str] = None):
@@ -124,6 +206,49 @@ class EVTOLDataset(Dataset):
             target = self.transform(target)
         return sequence, target
 
+def get_battery_dataset(data_path: str, sequence_length: int = 50,
+                       train_ratio: float = 0.7, val_ratio: float = 0.15,
+                       classification_mode: bool = True) -> Tuple[BatteryAnomalyDataset, BatteryAnomalyDataset, BatteryAnomalyDataset]:
+    """获取电池异常检测数据集"""
+    
+    data_path = Path(data_path)
+    if not data_path.exists():
+        raise ValueError(f"数据路径不存在: {data_path}")
+    
+    # 加载完整数据集
+    file_path = data_path / "battery_anomaly_dataset.csv"
+    if not file_path.exists():
+        raise ValueError(f"电池数据文件不存在: {file_path}")
+    
+    df = pd.read_csv(file_path)
+    n_samples = len(df)
+    
+    # 按时间序列划分数据集
+    train_end = int(n_samples * train_ratio)
+    val_end = int(n_samples * (train_ratio + val_ratio))
+    
+    # 保存分割后的数据
+    train_df = df[:train_end]
+    val_df = df[train_end:val_end]
+    test_df = df[val_end:]
+    
+    train_df.to_csv(data_path / "battery_train.csv", index=False)
+    val_df.to_csv(data_path / "battery_val.csv", index=False)
+    test_df.to_csv(data_path / "battery_test.csv", index=False)
+    
+    # 创建数据集对象
+    train_dataset = BatteryAnomalyDataset(str(data_path), sequence_length, 
+                                         file_ids=['battery_train'], 
+                                         classification_mode=classification_mode)
+    val_dataset = BatteryAnomalyDataset(str(data_path), sequence_length, 
+                                       file_ids=['battery_val'], 
+                                       classification_mode=classification_mode)
+    test_dataset = BatteryAnomalyDataset(str(data_path), sequence_length, 
+                                        file_ids=['battery_test'], 
+                                        classification_mode=classification_mode)
+    
+    return train_dataset, val_dataset, test_dataset
+
 def get_dataset(data_path: str, sequence_length: int = 50, prediction_steps: int = 1,
                 train_ratio: float = 0.7, val_ratio: float = 0.15,
                 prediction_targets: List[str] = None) -> Tuple[EVTOLDataset, EVTOLDataset, EVTOLDataset]:
@@ -167,5 +292,129 @@ def get_dataset(data_path: str, sequence_length: int = 50, prediction_steps: int
         train_dataset.prediction_targets = prediction_targets
         val_dataset.prediction_targets = prediction_targets
         test_dataset.prediction_targets = prediction_targets
+    
+    return train_dataset, val_dataset, test_dataset
+
+class FlightAnomalyDataset(Dataset):
+    def __init__(self, data_path: str, sequence_length: int = 50, 
+                transform=None, is_train: bool = True, file_ids: List[str] = None,
+                classification_mode: bool = True):
+        self.sequence_length = sequence_length
+        self.transform = transform
+        self.is_train = is_train
+        self.data_path = data_path
+        self.classification_mode = classification_mode
+        
+        self.feature_columns = [
+            'x', 'y', 'z', 'roll', 'pitch', 'yaw', 'velocity', 'acceleration', 'altitude'
+        ]
+        self.file_ids = file_ids if file_ids else ['flight_attitude_anomaly_dataset']
+        
+        self._preload_data()
+        
+        # 计算序列数并创建索引映射
+        self.sequence_indices = []
+        self.total_sequences = 0
+        
+        self._initialize_sequences()
+        
+        if self.total_sequences == 0:
+            raise ValueError("No valid sequences found in the dataset!")
+    
+    def _preload_data(self):
+        print("预加载飞行姿态异常检测数据...")
+        self.data_cache = {}
+        
+        for file_id in self.file_ids:
+            file_path = Path(self.data_path) / f"{file_id}.csv"
+            if not file_path.exists():
+                continue
+                
+            df = pd.read_csv(file_path)
+            self.data_cache[file_id] = df
+    
+    def _initialize_sequences(self):
+        for file_id, df in self.data_cache.items():
+            n_samples = len(df) - self.sequence_length + 1
+            
+            if n_samples > 0:
+                for i in range(n_samples):
+                    self.sequence_indices.append({
+                        'file_id': file_id,
+                        'start_idx': i,
+                        'end_idx': i + self.sequence_length
+                    })
+                self.total_sequences += n_samples
+    
+    def __len__(self) -> int:
+        return self.total_sequences
+    
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        seq_info = self.sequence_indices[idx]
+        df = self.data_cache[seq_info['file_id']]
+        
+        sequence_data = df.iloc[seq_info['start_idx']:seq_info['end_idx']]
+        sequence = sequence_data[self.feature_columns].values
+        
+        if self.classification_mode:
+            # 分类模式：返回序列的最后一个时间步的标签
+            label = sequence_data['label'].iloc[-1]
+            sequence = torch.FloatTensor(sequence)
+            label = torch.LongTensor([label])
+            return sequence, label
+        else:
+            # 回归模式：预测下一个时间步
+            if seq_info['end_idx'] < len(df):
+                target = df.iloc[seq_info['end_idx']]['roll']  # 以roll角为预测目标
+                sequence = torch.FloatTensor(sequence)
+                target = torch.FloatTensor([target])
+                return sequence, target
+            else:
+                # 如果没有下一个时间步，返回当前时间步
+                target = sequence_data['roll'].iloc[-1]
+                sequence = torch.FloatTensor(sequence)
+                target = torch.FloatTensor([target])
+                return sequence, target
+
+def get_flight_dataset(data_path: str, sequence_length: int = 50,
+                      train_ratio: float = 0.7, val_ratio: float = 0.15,
+                      classification_mode: bool = True) -> Tuple[FlightAnomalyDataset, FlightAnomalyDataset, FlightAnomalyDataset]:
+    """获取飞行姿态异常检测数据集"""
+    
+    data_path = Path(data_path)
+    if not data_path.exists():
+        raise ValueError(f"数据路径不存在: {data_path}")
+    
+    # 加载完整数据集
+    file_path = data_path / "flight_attitude_anomaly_dataset.csv"
+    if not file_path.exists():
+        raise ValueError(f"飞行姿态数据文件不存在: {file_path}")
+    
+    df = pd.read_csv(file_path)
+    n_samples = len(df)
+    
+    # 按时间序列划分数据集
+    train_end = int(n_samples * train_ratio)
+    val_end = int(n_samples * (train_ratio + val_ratio))
+    
+    # 保存分割后的数据
+    train_df = df[:train_end]
+    val_df = df[train_end:val_end]
+    test_df = df[val_end:]
+    
+    train_df.to_csv(data_path / "flight_train.csv", index=False)
+    val_df.to_csv(data_path / "flight_val.csv", index=False)
+    test_df.to_csv(data_path / "flight_test.csv", index=False)
+    
+    # 创建数据集对象
+    train_dataset = FlightAnomalyDataset(str(data_path), sequence_length, 
+                                        file_ids=['flight_train'], 
+                                        classification_mode=classification_mode)
+    val_dataset = FlightAnomalyDataset(str(data_path), sequence_length, 
+                                      file_ids=['flight_val'], 
+                                      classification_mode=classification_mode)
+    test_dataset = FlightAnomalyDataset(str(data_path), sequence_length, 
+                                       file_ids=['flight_test'], 
+                                       classification_mode=classification_mode)
     
     return train_dataset, val_dataset, test_dataset

@@ -5,6 +5,206 @@ from torch.utils.data import DataLoader
 import numpy as np
 from tqdm import tqdm
 
+class BatteryAnomalyLSTM(nn.Module):
+    """电池异常检测LSTM模型"""
+    def __init__(self, input_size=7, hidden_size=128, num_layers=2, num_classes=2, 
+                 dropout=0.2, use_uncertainty=True):
+        super(BatteryAnomalyLSTM, self).__init__()
+        
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.num_classes = num_classes
+        self.dropout = dropout
+        self.use_uncertainty = use_uncertainty
+        
+        self.lstm = nn.LSTM(
+            input_size=self.input_size,
+            hidden_size=self.hidden_size,
+            num_layers=self.num_layers,
+            batch_first=True,
+            dropout=self.dropout if self.num_layers > 1 else 0
+        )
+        
+        # 分类头
+        self.classifier = nn.Sequential(
+            nn.Linear(self.hidden_size, self.hidden_size // 2),
+            nn.ReLU(),
+            nn.Dropout(self.dropout),
+            nn.Linear(self.hidden_size // 2, self.num_classes)
+        )
+        
+        # 不确定性估计头（可选）
+        if self.use_uncertainty:
+            self.uncertainty_head = nn.Sequential(
+                nn.Linear(self.hidden_size, self.hidden_size // 2),
+                nn.ReLU(),
+                nn.Dropout(self.dropout),
+                nn.Linear(self.hidden_size // 2, 1)  # 输出不确定性分数
+            )
+    
+    def forward(self, x, return_uncertainty=False):
+        """
+        前向传播
+        Args:
+            x: 输入张量 [batch_size, seq_len, input_size]
+            return_uncertainty: 是否返回不确定性估计
+        """
+        batch_size = x.size(0)
+        
+        # LSTM前向传播
+        lstm_out, _ = self.lstm(x)
+        last_output = lstm_out[:, -1, :]  # 取最后一个时间步的输出
+        
+        # 分类预测
+        logits = self.classifier(last_output)
+        
+        if return_uncertainty and self.use_uncertainty:
+            # 不确定性估计
+            uncertainty = torch.sigmoid(self.uncertainty_head(last_output))
+            return {
+                'logits': logits,
+                'probabilities': torch.softmax(logits, dim=1),
+                'uncertainty': uncertainty.squeeze(-1),
+                'prediction': torch.argmax(logits, dim=1)
+            }
+        else:
+            return {
+                'logits': logits,
+                'probabilities': torch.softmax(logits, dim=1),
+                'prediction': torch.argmax(logits, dim=1)
+            }
+    
+    def predict_with_confidence(self, x, confidence_threshold=0.8):
+        """
+        带置信度的预测
+        Args:
+            x: 输入张量
+            confidence_threshold: 置信度阈值
+        """
+        result = self.forward(x, return_uncertainty=True)
+        
+        max_probs, predictions = torch.max(result['probabilities'], dim=1)
+        
+        # 基于概率的置信度
+        confidence = max_probs
+        
+        # 如果使用不确定性估计，结合不确定性分数
+        if self.use_uncertainty:
+            uncertainty_confidence = 1 - result['uncertainty']
+            confidence = (confidence + uncertainty_confidence) / 2
+        
+        # 标记低置信度预测
+        low_confidence_mask = confidence < confidence_threshold
+        
+        return {
+            'predictions': predictions,
+            'confidence': confidence,
+            'low_confidence_mask': low_confidence_mask,
+            'probabilities': result['probabilities'],
+            'uncertainty': result.get('uncertainty', None)
+        }
+
+class FlightAnomalyLSTM(nn.Module):
+    """飞行姿态异常检测LSTM模型"""
+    def __init__(self, input_size=9, hidden_size=128, num_layers=2, num_classes=2, 
+                 dropout=0.2, use_uncertainty=True):
+        super(FlightAnomalyLSTM, self).__init__()
+        
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.num_classes = num_classes
+        self.dropout = dropout
+        self.use_uncertainty = use_uncertainty
+        
+        self.lstm = nn.LSTM(
+            input_size=self.input_size,
+            hidden_size=self.hidden_size,
+            num_layers=self.num_layers,
+            batch_first=True,
+            dropout=self.dropout if self.num_layers > 1 else 0
+        )
+        
+        # 分类头
+        self.classifier = nn.Sequential(
+            nn.Linear(self.hidden_size, self.hidden_size // 2),
+            nn.ReLU(),
+            nn.Dropout(self.dropout),
+            nn.Linear(self.hidden_size // 2, self.num_classes)
+        )
+        
+        # 不确定性估计头（可选）
+        if self.use_uncertainty:
+            self.uncertainty_head = nn.Sequential(
+                nn.Linear(self.hidden_size, self.hidden_size // 2),
+                nn.ReLU(),
+                nn.Dropout(self.dropout),
+                nn.Linear(self.hidden_size // 2, 1)  # 输出不确定性分数
+            )
+    
+    def forward(self, x, return_uncertainty=False):
+        """
+        前向传播
+        Args:
+            x: 输入张量 [batch_size, seq_len, input_size]
+            return_uncertainty: 是否返回不确定性估计
+        """
+        batch_size = x.size(0)
+        
+        # LSTM前向传播
+        lstm_out, _ = self.lstm(x)
+        last_output = lstm_out[:, -1, :]  # 取最后一个时间步的输出
+        
+        # 分类预测
+        logits = self.classifier(last_output)
+        
+        if return_uncertainty and self.use_uncertainty:
+            # 不确定性估计
+            uncertainty = torch.sigmoid(self.uncertainty_head(last_output))
+            return {
+                'logits': logits,
+                'probabilities': torch.softmax(logits, dim=1),
+                'uncertainty': uncertainty.squeeze(-1),
+                'prediction': torch.argmax(logits, dim=1)
+            }
+        else:
+            return {
+                'logits': logits,
+                'probabilities': torch.softmax(logits, dim=1),
+                'prediction': torch.argmax(logits, dim=1)
+            }
+    
+    def predict_with_confidence(self, x, confidence_threshold=0.8):
+        """
+        带置信度的预测
+        Args:
+            x: 输入张量
+            confidence_threshold: 置信度阈值
+        """
+        result = self.forward(x, return_uncertainty=True)
+        
+        max_probs, predictions = torch.max(result['probabilities'], dim=1)
+        
+        # 基于概率的置信度
+        confidence = max_probs
+        
+        # 如果使用不确定性估计，结合不确定性分数
+        if self.use_uncertainty:
+            uncertainty_confidence = 1 - result['uncertainty']
+            confidence = (confidence + uncertainty_confidence) / 2
+        
+        # 标记低置信度预测
+        low_confidence_mask = confidence < confidence_threshold
+        
+        return {
+            'predictions': predictions,
+            'confidence': confidence,
+            'low_confidence_mask': low_confidence_mask,
+            'probabilities': result['probabilities'],
+            'uncertainty': result.get('uncertainty', None)
+        }
+
 class LSTM(nn.Module):
     def __init__(self, config):
         super(LSTM, self).__init__()
