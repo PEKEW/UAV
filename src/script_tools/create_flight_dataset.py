@@ -6,6 +6,7 @@ import os
 import psutil
 from sklearn.preprocessing import MinMaxScaler
 from pathlib import Path
+import numpy as np
 
 def get_memory_usage():
     """获取当前内存使用情况"""

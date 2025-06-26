@@ -54,3 +54,10 @@ comp/README.md
 comp/新数据集生成需求说明.md
 
 *.log
+CLEANUP_CANDIDATES.md
+config_sample.yaml
+config_stable.yaml
+H5_DATASET_README.md
+processed/evtol_anomaly_dataset_3d.h5
+
+bak_ui/

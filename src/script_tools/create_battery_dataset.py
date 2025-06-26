@@ -112,13 +112,13 @@ def inject_anomalies_to_segments(segments, anomaly_ratio=1/3):
 
 def inject_single_anomaly_guaranteed(df, segment_duration=30):
     """
-    向单个数据段注入异常，确保异常时长≥10秒
+    向单个数据段注入异常，确保异常时长≥15秒
     """
     if len(df) == 0:
         return 0, df
     
-    # 确保异常时长≥10秒
-    anomaly_duration = random.uniform(10, 25)
+    # 确保异常时长≥15秒
+    anomaly_duration = random.uniform(15, 30)
     
     anomaly_types = ['voltage_drop', 'current_spike', 'temperature_rise', 'capacity_fade', 'voltage_fluctuation']
     anomaly_type = random.choice(anomaly_types)
@@ -146,25 +146,25 @@ def inject_single_anomaly_guaranteed(df, segment_duration=30):
     df_modified = df.copy()
     
     if anomaly_type == 'voltage_drop' and 'Ecell_V' in df.columns:
-        df_modified.loc[anomaly_mask, 'Ecell_V'] -= random.uniform(0.2, 0.5)
+        df_modified.loc[anomaly_mask, 'Ecell_V'] -= random.uniform(0.5, 1.2)
         
     elif anomaly_type == 'current_spike' and 'I_mA' in df.columns:
-        spike_magnitude = random.uniform(300, 800)
+        spike_magnitude = random.uniform(800, 1500)
         df_modified.loc[anomaly_mask, 'I_mA'] += spike_magnitude
         
     elif anomaly_type == 'temperature_rise' and 'Temperature__C' in df.columns:
-        temp_increase = random.uniform(10, 20)
+        temp_increase = random.uniform(20, 35)
         df_modified.loc[anomaly_mask, 'Temperature__C'] += temp_increase
         
     elif anomaly_type == 'capacity_fade':
         if 'QCharge_mA_h' in df.columns:
-            fade_amount = random.uniform(100, 300)
+            fade_amount = random.uniform(300, 600)
             df_modified.loc[anomaly_mask, 'QCharge_mA_h'] -= fade_amount
         if 'QDischarge_mA_h' in df.columns:
-            df_modified.loc[anomaly_mask, 'QDischarge_mA_h'] += fade_amount * 0.3
+            df_modified.loc[anomaly_mask, 'QDischarge_mA_h'] += fade_amount * 0.5
             
     elif anomaly_type == 'voltage_fluctuation' and 'Ecell_V' in df.columns:
-        fluctuation = np.random.normal(0, 0.1, affected_points)
+        fluctuation = np.random.normal(0, 0.25, affected_points)
         df_modified.loc[anomaly_mask, 'Ecell_V'] += fluctuation
     
     return anomaly_duration, df_modified
@@ -180,21 +180,89 @@ def create_final_dataset(segments):
                     'EnergyDischarge_W_h', 'QDischarge_mA_h', 'Temperature__C']
     
     for i, segment in enumerate(segments):
-        df = segment['data']
+        df = segment['data'].copy()
         
-        # 确保每个样本有30个时间点
+        # 确保每个样本有30个时间点，避免重复行
         if len(df) < 30:
-            # 如果数据点不足30个，通过插值或重复来补充
-            df = df.reset_index(drop=True)
-            while len(df) < 30:
-                df = pd.concat([df, df.iloc[-1:]], ignore_index=True)
+            # 如果数据点不足30个，使用线性插值而不是重复行
+            if len(df) >= 2:
+                # 使用时间插值创建30个均匀分布的点
+                if 'time_s' in df.columns:
+                    time_min = df['time_s'].min()
+                    time_max = df['time_s'].max()
+                    new_times = np.linspace(time_min, time_max, 30)
+                    
+                    # 对每个特征列进行插值
+                    interpolated_data = {'time_s': new_times}
+                    for col in feature_columns:
+                        if col in df.columns:
+                            interpolated_data[col] = np.interp(new_times, df['time_s'], df[col])
+                        else:
+                            interpolated_data[col] = np.zeros(30)
+                    
+                    df = pd.DataFrame(interpolated_data)
+                else:
+                    # 如果没有时间列，使用索引插值
+                    indices = np.linspace(0, len(df)-1, 30)
+                    interpolated_data = {}
+                    for col in feature_columns:
+                        if col in df.columns:
+                            interpolated_data[col] = np.interp(indices, range(len(df)), df[col])
+                        else:
+                            interpolated_data[col] = np.zeros(30)
+                    df = pd.DataFrame(interpolated_data)
+            else:
+                # 如果只有1个或0个数据点，使用重复填充而不是跳过
+                print(f"警告: 样本 {i} 数据点不足({len(df)}个)，使用重复填充")
+                if len(df) == 1:
+                    # 如果只有1个数据点，重复30次并添加小的随机噪声
+                    single_row = df.iloc[0].copy()
+                    repeated_data = []
+                    for _ in range(30):
+                        new_row = single_row.copy()
+                        # 为数值列添加小的随机噪声
+                        for col in feature_columns:
+                            if col in new_row and pd.notna(new_row[col]):
+                                # 添加标准差1%的随机噪声
+                                noise = np.random.normal(0, abs(new_row[col]) * 0.01)
+                                new_row[col] += noise
+                        repeated_data.append(new_row)
+                    df = pd.DataFrame(repeated_data)
+                else:
+                    # 如果0个数据点，创建默认值
+                    default_data = {}
+                    if 'time_s' in df.columns:
+                        default_data['time_s'] = np.linspace(0, 30, 30)
+                    for col in feature_columns:
+                        default_data[col] = np.zeros(30)
+                    df = pd.DataFrame(default_data)
+        
         elif len(df) > 30:
-            # 如果数据点超过30个，均匀采样30个点
+            # 如果数据点超过30个，均匀采样30个点（确保不重复）
             indices = np.linspace(0, len(df)-1, 30, dtype=int)
+            # 确保索引唯一
+            indices = np.unique(indices)
+            if len(indices) < 30:
+                # 如果去重后不足30个，补充一些索引
+                additional_indices = np.random.choice(len(df), 30-len(indices), replace=False)
+                indices = np.sort(np.concatenate([indices, additional_indices]))
+            else:
+                indices = indices[:30]
             df = df.iloc[indices].reset_index(drop=True)
         
-        # 确保df正好有30行
+        # 确保df正好有30行且无重复
         df = df.head(30).reset_index(drop=True)
+        
+        # 检查并移除重复行
+        if df.duplicated().any():
+            print(f"警告: 样本 {i} 存在重复行，正在处理...")
+            # 保留第一次出现的行，对重复行添加小的随机噪声
+            duplicated_mask = df.duplicated(keep='first')
+            for col in feature_columns:
+                if col in df.columns and duplicated_mask.any():
+                    # 对重复行的数值列添加小的随机噪声
+                    noise = np.random.normal(0, df[col].std() * 0.001, duplicated_mask.sum())
+                    df.loc[duplicated_mask, col] += noise
         
         # 添加样本元数据
         df['sample_id'] = i
@@ -306,7 +374,7 @@ def main():
     segments = slice_data_into_30s_segments(data_dict)
     
     print("\n注入异常")
-    segments_with_anomalies = inject_anomalies_to_segments(segments, anomaly_ratio=1/3)
+    segments_with_anomalies = inject_anomalies_to_segments(segments, anomaly_ratio=1/2)
     
     final_dataset = create_final_dataset(segments_with_anomalies)
     
