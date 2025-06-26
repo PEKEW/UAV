@@ -53,6 +53,9 @@ def slice_data_into_30s_segments(data_dict, time_column='time_s'):
         current_time = start_time
         segment_id = 0
         
+        # test_max_count = 1000
+        # test_count = 0
+        
         while current_time + window_size <= end_time:
             mask = (time_data >= current_time) & (time_data < current_time + window_size)
             segment_data = df[mask].copy()
@@ -69,13 +72,15 @@ def slice_data_into_30s_segments(data_dict, time_column='time_s'):
                 all_segments.append(segment_info)
                 segment_id += 1
             current_time += window_size
-    
+            # test_count += 1
+            # if test_count >= test_max_count:
+            #     break
     print(f"总共生成 {len(all_segments)} 个数据段")
     return all_segments
 
 def inject_anomalies_to_segments(segments, anomaly_ratio=1/3):
     """
-    当注入的异常段时长≥10秒(33%)时，整个30秒段标记为异常
+    直接随机选择样本注入异常，确保异常时长≥10秒
     """
     total_segments = len(segments)
     target_anomaly_count = int(total_segments * anomaly_ratio)
@@ -88,46 +93,16 @@ def inject_anomalies_to_segments(segments, anomaly_ratio=1/3):
         segment['original_data'] = df.copy()
         
         if i in anomaly_indices:
-            # 注入异常段
-            anomaly_duration, modified_df = inject_single_anomaly(df, segment['duration'])
+            # 直接注入异常，确保异常时长≥10秒
+            anomaly_duration, modified_df = inject_single_anomaly_guaranteed(df, segment['duration'])
             segment['data'] = modified_df
             segment['anomaly_duration'] = anomaly_duration
-            
-            if anomaly_duration >= 10:
-                segment['label'] = 1
-                segment['is_anomaly'] = True
-            else:
-                segment['label'] = 0
-                segment['is_anomaly'] = False
+            segment['label'] = 1
+            segment['is_anomaly'] = True
         else:
             segment['label'] = 0
             segment['is_anomaly'] = False
             segment['anomaly_duration'] = 0
-    
-    actual_anomaly_count = sum(1 for seg in segments if seg['label'] == 1)
-    
-    if actual_anomaly_count < target_anomaly_count * 0.8:
-        # 大概率异常比例过低，需要增加异常注入 
-        print(f"实际异常比例过低，尝试增加异常注入")
-        normal_indices = [i for i, seg in enumerate(segments) if seg['label'] == 0]
-        additional_needed = target_anomaly_count - actual_anomaly_count
-        
-        if len(normal_indices) >= additional_needed:
-            additional_indices = random.sample(normal_indices, additional_needed)
-            
-            for i in additional_indices:
-                segment = segments[i]
-                df = segment['original_data'].copy()
-                anomaly_duration, modified_df = inject_single_anomaly(df, segment['duration'])
-                segment['data'] = modified_df
-                segment['anomaly_duration'] = anomaly_duration
-                
-                if anomaly_duration >= 10:
-                    segment['label'] = 1
-                    segment['is_anomaly'] = True
-                else:
-                    segment['label'] = 0
-                    segment['is_anomaly'] = False
     
     actual_anomaly_count = sum(1 for seg in segments if seg['label'] == 1)
     print(f"目标异常段数: {target_anomaly_count}")
@@ -135,14 +110,15 @@ def inject_anomalies_to_segments(segments, anomaly_ratio=1/3):
     
     return segments
 
-def inject_single_anomaly(df, segment_duration=30):
+def inject_single_anomaly_guaranteed(df, segment_duration=30):
     """
-    向单个数据段注入异常
+    向单个数据段注入异常，确保异常时长≥10秒
     """
     if len(df) == 0:
         return 0, df
     
-    anomaly_duration = random.uniform(5, 25)
+    # 确保异常时长≥10秒
+    anomaly_duration = random.uniform(10, 25)
     
     anomaly_types = ['voltage_drop', 'current_spike', 'temperature_rise', 'capacity_fade', 'voltage_fluctuation']
     anomaly_type = random.choice(anomaly_types)
@@ -194,7 +170,11 @@ def inject_single_anomaly(df, segment_duration=30):
     return anomaly_duration, df_modified
 
 def create_final_dataset(segments):
-    all_data = []
+    """
+    创建最终数据集，每个30秒段作为一个样本
+    每个样本保持原始时间序列数据，形状为30*9
+    """
+    all_samples = []
     
     feature_columns = ['Ecell_V', 'I_mA', 'EnergyCharge_W_h', 'QCharge_mA_h',
                     'EnergyDischarge_W_h', 'QDischarge_mA_h', 'Temperature__C']
@@ -202,31 +182,55 @@ def create_final_dataset(segments):
     for i, segment in enumerate(segments):
         df = segment['data']
         
-        df = df.copy()
-        df['segment_id'] = i
+        # 确保每个样本有30个时间点
+        if len(df) < 30:
+            # 如果数据点不足30个，通过插值或重复来补充
+            df = df.reset_index(drop=True)
+            while len(df) < 30:
+                df = pd.concat([df, df.iloc[-1:]], ignore_index=True)
+        elif len(df) > 30:
+            # 如果数据点超过30个，均匀采样30个点
+            indices = np.linspace(0, len(df)-1, 30, dtype=int)
+            df = df.iloc[indices].reset_index(drop=True)
+        
+        # 确保df正好有30行
+        df = df.head(30).reset_index(drop=True)
+        
+        # 添加样本元数据
+        df['sample_id'] = i
         df['file_id'] = segment['file_id']
         df['label'] = segment['label']
         df['is_anomaly'] = segment['is_anomaly']
         df['anomaly_duration'] = segment['anomaly_duration']
         
+        # 确保所有特征列都存在
         for col in feature_columns:
             if col not in df.columns:
                 df[col] = 0
         
-        all_data.append(df)
+        # 重新排列列顺序，确保一致性
+        base_columns = ['time_s'] if 'time_s' in df.columns else []
+        meta_columns = ['sample_id', 'file_id', 'label', 'is_anomaly', 'anomaly_duration']
+        feature_columns_exist = [col for col in feature_columns if col in df.columns]
+        
+        column_order = base_columns + meta_columns + feature_columns_exist
+        df = df[column_order]
+        
+        all_samples.append(df)
     
-    final_df = pd.concat(all_data, ignore_index=True)
+    # 合并所有样本
+    final_df = pd.concat(all_samples, ignore_index=True)
     
-    final_df = final_df.fillna(0)
-    
-    total_points = len(final_df)
-    anomaly_points = len(final_df[final_df['label'] == 1])
-    normal_points = len(final_df[final_df['label'] == 0])
+    total_samples = len(segments)
+    anomaly_samples = sum(1 for seg in segments if seg['label'] == 1)
+    normal_samples = sum(1 for seg in segments if seg['label'] == 0)
     
     print(f"\n数据集统计:")
-    print(f"总数据点: {total_points}")
-    print(f"正常数据点: {normal_points} ({normal_points/total_points*100:.1f}%)")
-    print(f"异常数据点: {anomaly_points} ({anomaly_points/total_points*100:.1f}%)")
+    print(f"总样本数: {total_samples}")
+    print(f"正常样本数: {normal_samples} ({normal_samples/total_samples*100:.1f}%)")
+    print(f"异常样本数: {anomaly_samples} ({anomaly_samples/total_samples*100:.1f}%)")
+    print(f"每个样本形状: 30 * {len(feature_columns_exist)}")
+    print(f"数据集总形状: {final_df.shape}")
     
     return final_df
 
@@ -236,10 +240,29 @@ def save_dataset_and_segments(final_df, segments, output_dir):
     processed_dir = output_dir / 'processed'
     processed_dir.mkdir(exist_ok=True)
     
+    # 保存时间序列数据集
     dataset_path = output_dir / 'evtol_anomaly_dataset.csv'
     final_df.to_csv(dataset_path, index=False)
-    print(f"数据集已保存到: {dataset_path}")
+    print(f"时间序列数据集已保存到: {dataset_path}")
+    print(f"数据集形状: {final_df.shape}")
     
+    # 计算样本统计信息
+    unique_samples = final_df['sample_id'].nunique()
+    feature_columns = ['Ecell_V', 'I_mA', 'EnergyCharge_W_h', 'QCharge_mA_h',
+                    'EnergyDischarge_W_h', 'QDischarge_mA_h', 'Temperature__C']
+    feature_columns_exist = [col for col in feature_columns if col in final_df.columns]
+    print(f"样本数: {unique_samples}")
+    print(f"每个样本时间步数: 30")
+    print(f"特征数: {len(feature_columns_exist)}")
+    print(f"每个样本形状: 30 * {len(feature_columns_exist)}")
+    
+    # 保存样本级标签信息
+    sample_labels = final_df[['sample_id', 'file_id', 'label', 'is_anomaly', 'anomaly_duration']].drop_duplicates()
+    sample_labels_path = processed_dir / 'sample_labels.csv'
+    sample_labels.to_csv(sample_labels_path, index=False)
+    print(f"样本标签信息已保存到: {sample_labels_path}")
+    
+    # 保存段信息（保持原有格式）
     segment_info = []
     for segment in segments:
         info = {
@@ -269,7 +292,7 @@ def main():
     evtol_data_path = "Datasets/EVTOL"
     output_dir = "."
     
-    selected_files = select_random_evtol_files(evtol_data_path, n_files=3)
+    selected_files = select_random_evtol_files(evtol_data_path, n_files=1)
     print(f"选中的文件: {[f.name for f in selected_files]}")
     
     raw_data_dir = Path(output_dir) / "raw_data"

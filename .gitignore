@@ -52,3 +52,5 @@ temp/
 comp/README.md
 数据集生成与模型训练说明.md
 comp/新数据集生成需求说明.md
+
+*.log
