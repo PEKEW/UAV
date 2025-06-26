@@ -19,7 +19,7 @@ def print_memory_usage(stage=""):
     memory_mb = get_memory_usage()
     print(f"内存使用 {stage}: {memory_mb:.1f} MB")
 
-def generate_flight_attitude_dataset(n_samples, window_size=30, anomaly_ratio=1/3, output_file=None):
+def generate_flight_attitude_dataset(n_samples, window_size=30, anomaly_ratio=1/2, output_file=None):
     """使用流式处理生成飞行姿态数据集，直接保存到文件"""
     points_per_sample = window_size * 10
     total_points = n_samples * points_per_sample
@@ -28,7 +28,7 @@ def generate_flight_attitude_dataset(n_samples, window_size=30, anomaly_ratio=1/
     print(f"总数据点: {total_points:,}")
     
     # 分块处理，每次处理1000个样本（更小的块）
-    chunk_size = 1000
+    chunk_size = 2000
     all_chunks = []
     
     # 如果指定了输出文件，直接写入文件
@@ -98,7 +98,7 @@ def generate_flight_attitude_dataset(n_samples, window_size=30, anomaly_ratio=1/
             
             if len(anomaly_indices) > 0:
                 anomaly_type = random.choice(['spiral_dive', 'sudden_turn', 'altitude_drop', 
-                                             'roll_instability', 'stall', 'wind_shear'])
+                                            'roll_instability', 'stall', 'wind_shear'])
                 
                 segment_length = len(anomaly_indices)
                 t_segment = np.linspace(0, 1, segment_length)
@@ -143,7 +143,7 @@ def generate_flight_attitude_dataset(n_samples, window_size=30, anomaly_ratio=1/
         altitude = 100 + z
         
         # 添加噪声
-        noise_level = 0.5
+        noise_level = 0.6
         x += np.random.normal(0, noise_level, chunk_points)
         y += np.random.normal(0, noise_level, chunk_points)
         z += np.random.normal(0, noise_level * 0.3, chunk_points)
@@ -378,10 +378,10 @@ def get_evtol_dataset_size():
         
         # 如果找不到battery数据集，使用默认值
         print("未找到battery数据集，使用默认样本数")
-        return 1000
+        return 20000
     except Exception as e:
         print(f"读取battery数据集信息失败: {e}，使用默认样本数")
-        return 1000
+        return 20000
 
 def main():
     random.seed(42)
@@ -403,7 +403,7 @@ def main():
     flight_data = generate_flight_attitude_dataset(
         n_samples=target_samples,
         window_size=30,
-        anomaly_ratio=1/3
+        anomaly_ratio=1/2
     )
     print_memory_usage("生成数据后")
     

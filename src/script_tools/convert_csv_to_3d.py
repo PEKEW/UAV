@@ -62,6 +62,7 @@ class CSVTo3DConverter:
         dtype_dict = {
             'sample_id': 'int32',
             'file_id': 'category',
+            'sample_label': 'int8',
             'label': 'int8',
             'is_anomaly': 'int8',
             'anomaly_duration': 'float32',
@@ -77,8 +78,16 @@ class CSVTo3DConverter:
             for feature in self.flight_features:
                 dtype_dict[feature] = 'float32'
         
-        # 只读取必要的列
-        usecols = ['sample_id', 'label', 'is_anomaly']
+        # 只读取必要的列（动态检测可用的列）
+        usecols = ['sample_id']
+        
+        # 检测标签列
+        label_columns = ['sample_label', 'label', 'is_anomaly']
+        available_label_cols = [col for col in label_columns if col in sample_df.columns]
+        if available_label_cols:
+            usecols.extend(available_label_cols)
+        
+        # 添加特征列
         if data_type == 'battery':
             for feature in self.battery_features:
                 if feature in sample_df.columns:
@@ -93,6 +102,14 @@ class CSVTo3DConverter:
             usecols.append('time_s')
         elif 'time' in sample_df.columns:
             usecols.append('time')
+        
+        # 如果存在其他元数据列，也读取
+        meta_columns = ['file_id', 'anomaly_duration']
+        for col in meta_columns:
+            if col in sample_df.columns:
+                usecols.append(col)
+        
+        logger.info(f"将读取的列: {usecols}")
         
         # 分块读取大文件
         chunks = []
@@ -139,13 +156,23 @@ class CSVTo3DConverter:
         """提取样本标签"""
         logger.info("提取样本标签...")
         
+        # 检测可用的标签列
+        label_columns = ['sample_label', 'label', 'is_anomaly']
+        available_label_cols = [col for col in label_columns if col in df.columns]
+        
+        if not available_label_cols:
+            raise ValueError("未找到任何标签列，请检查数据格式")
+        
+        # 使用第一个可用的标签列
+        label_col = available_label_cols[0]
+        logger.info(f"使用标签列: {label_col}")
+        
         # 获取每个样本的标签（取第一个，因为都是相同的）
         sample_labels = df.groupby('sample_id').agg({
-            'label': 'first',
-            'is_anomaly': 'first'
+            label_col: 'first'
         }).reset_index()
         
-        labels = sample_labels['label'].values.astype(np.int8)
+        labels = sample_labels[label_col].values.astype(np.int8)
         
         # 统计标签分布
         unique_labels, counts = np.unique(labels, return_counts=True)
@@ -153,7 +180,8 @@ class CSVTo3DConverter:
             'unique_labels': unique_labels.tolist(),
             'counts': counts.tolist(),
             'total_samples': len(labels),
-            'anomaly_ratio': (labels == 1).mean()
+            'anomaly_ratio': (labels == 1).mean(),
+            'label_column_used': label_col
         }
         
         logger.info(f"标签分布: {dict(zip(unique_labels, counts))}")
@@ -266,11 +294,7 @@ class CSVTo3DConverter:
             self.save_to_npz(data_3d, labels, feature_columns, str(output_path), 
                             label_stats, data_type)
         
-        # 清理内存
-        del self.raw_data, data_3d, labels
-        gc.collect()
-        
-        # 统计信息
+        # 统计信息（在删除变量之前计算）
         total_time = time.time() - start_time
         file_size = output_path.stat().st_size / (1024 * 1024)  # MB
         
@@ -278,7 +302,7 @@ class CSVTo3DConverter:
             'input_file': csv_path,
             'output_file': str(output_path),
             'data_type': data_type,
-            'data_shape': data_3d.shape,
+            'data_shape': data_3d.shape,  # 在这里使用 data_3d
             'n_samples': len(labels),
             'n_features': len(feature_columns),
             'sequence_length': self.sequence_length,
@@ -286,6 +310,10 @@ class CSVTo3DConverter:
             'processing_time': total_time,
             'output_size_mb': file_size
         }
+        
+        # 清理内存（在创建结果字典之后）
+        del self.raw_data, data_3d, labels
+        gc.collect()
         
         logger.info(f"转换完成，耗时: {total_time:.2f}秒")
         logger.info(f"输出文件大小: {file_size:.2f} MB")
@@ -326,18 +354,18 @@ def load_3d_data(file_path: str) -> Dict[str, Any]:
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='将CSV文件转换为3D数据格式')
-    parser.add_argument('--input-csv', default='evtol_anomaly_dataset.csv', 
-                       help='输入CSV文件路径 (默认: evtol_anomaly_dataset.csv)')
+    parser.add_argument('--input-csv', default='flight_anomaly_dataset.csv', 
+                    help='输入CSV文件路径 (默认: flight_anomaly_dataset.csv)')
     parser.add_argument('--output-dir', default='processed', 
-                       help='输出目录 (默认: processed)')
+                    help='输出目录 (默认: processed)')
     parser.add_argument('--format', choices=['h5', 'npz'], default='h5', 
-                       help='输出格式 (默认: h5)')
+                    help='输出格式 (默认: h5)')
     parser.add_argument('--sequence-length', type=int, default=30, 
-                       help='序列长度 (默认: 30)')
+                    help='序列长度 (默认: 30)')
     parser.add_argument('--chunk-size', type=int, default=10000, 
-                       help='数据加载块大小 (默认: 10000)')
+                    help='数据加载块大小 (默认: 10000)')
     parser.add_argument('--test-load', action='store_true', 
-                       help='转换后测试加载数据')
+                    help='转换后测试加载数据')
     
     args = parser.parse_args()
     
