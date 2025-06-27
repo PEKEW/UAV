@@ -740,8 +740,7 @@ class DualDomainDataLoader:
             self.battery_val_dataset = None
         
         # 飞行数据集 - 优先使用H5文件
-        # Test
-        if False and Path(self.flight_h5_path).exists():
+        if Path(self.flight_h5_path).exists():
             print("使用H5格式的飞行数据集")
             self.flight_train_dataset, self.flight_val_dataset = self._create_h5_split_datasets(
                 self.flight_h5_path,
@@ -750,19 +749,8 @@ class DualDomainDataLoader:
                 dataset_type='flight'
             )
             print(f"飞行H5数据集: 训练 {len(self.flight_train_dataset)} 样本, 验证 {len(self.flight_val_dataset)} 样本")
-        elif False and Path(self.flight_data_path).exists():
-            print("使用CSV格式的飞行数据集")
-            self.flight_train_dataset, self.flight_val_dataset = self._create_split_datasets(
-                self.flight_data_path,
-                train_split=0.8,
-                augmentation_config=self.flight_aug_config,
-                dataset_type='flight'
-            )
-            print(f"飞行CSV数据集: 训练 {len(self.flight_train_dataset)} 样本, 验证 {len(self.flight_val_dataset)} 样本")
         else:
-            print(f"警告: 飞行数据文件不存在 - H5: {self.flight_h5_path}, CSV: {self.flight_data_path}")
-            self.flight_train_dataset = None
-            self.flight_val_dataset = None
+            raise FileNotFoundError(f"飞行数据文件不存在 - H5: {self.flight_h5_path}")
     
     def get_battery_loaders(self) -> Tuple[Optional[DataLoader], Optional[DataLoader]]:
         """获取电池数据加载器"""

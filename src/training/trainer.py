@@ -71,7 +71,7 @@ class BaseTrainer:
     def _setup_loss_function(self):
         """设置损失函数"""
         loss_type = self.config.get('loss_function', 'focal')
-        # Test
+        # Test: 固定损失函数
         if False and loss_type == 'focal':
             self.criterion = FocalLoss(
                 alpha=self.config.get('focal_alpha', 0.25),
@@ -89,7 +89,7 @@ class BaseTrainer:
     def _setup_optimizer(self):
         """设置优化器"""
         optimizer_type = self.config.get('optimizer', 'adamw')
-        # Test
+        # Test: 固定优化器
         if True or optimizer_type == 'adamw':
             self.optimizer = optim.AdamW(
                 self.model.parameters(),
@@ -114,7 +114,7 @@ class BaseTrainer:
     def _setup_scheduler(self):
         """设置学习率调度器"""
         scheduler_type = self.config.get('scheduler', 'cosine')
-        # Test
+        # Test: 固定学习率调度器
         if True or scheduler_type == 'cosine':
             self.scheduler = WarmupCosineScheduler(
                 self.optimizer,
@@ -338,7 +338,7 @@ class BaseTrainer:
             
             self._save_checkpoint(epoch, train_metrics, val_metrics)
             
-            # Test
+            # Test: 不用早停
             if False and self._check_early_stopping(val_metrics):
                 self.logger.info(f"早停触发，在第{epoch}轮停止训练")
                 break
@@ -513,8 +513,7 @@ class DualDomainTrainer:
         self.config = config
         
         self.battery_trainer = BatteryTrainer(battery_model, config.get('battery_config', {}))
-        # Test
-        # self.flight_trainer = FlightTrainer(flight_model, config.get('flight_config', {}))
+        self.flight_trainer = FlightTrainer(flight_model, config.get('flight_config', {}))
 
         # 并发训练配置
         self.concurrent_training = config.get('concurrent_training', False)
@@ -523,8 +522,7 @@ class DualDomainTrainer:
               flight_loaders: Tuple[DataLoader, DataLoader]):
         """训练两个模型"""
         battery_train_loader, battery_val_loader = battery_loaders
-        # Test
-        # flight_train_loader, flight_val_loader = flight_loaders
+        flight_train_loader, flight_val_loader = flight_loaders
         
         if self.concurrent_training:
             # TODO: 实现并发训练
@@ -532,11 +530,11 @@ class DualDomainTrainer:
         else:
             # 顺序训练
             print("开始训练电池异常检测模型...")
-            self.battery_trainer.train(battery_train_loader, battery_val_loader)
+            # Test 电池分类模型已经训练好了 不需要再训练
+            # self.battery_trainer.train(battery_train_loader, battery_val_loader)
             
-            # Test
-            # print("开始训练飞行异常检测模型...")
-            # self.flight_trainer.train(flight_train_loader, flight_val_loader)
+            print("开始训练飞行异常检测模型...")
+            self.flight_trainer.train(flight_train_loader, flight_val_loader)
     
     def get_training_summary(self) -> Dict[str, Any]:
         """获取训练总结"""
@@ -545,10 +543,8 @@ class DualDomainTrainer:
                 'best_metric': self.battery_trainer.best_metric,
                 'history': dict(self.battery_trainer.training_history)
             },
-            # Test
-            # 'flight_training': {
-            #     'best_metric': self.flight_trainer.best_metric,
-            #     'history': dict(self.flight_trainer.training_history)
-            # }
-            'flight_training': None
+            'flight_training': {
+                'best_metric': self.flight_trainer.best_metric,
+                'history': dict(self.flight_trainer.training_history)
+            }
         }

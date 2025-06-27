@@ -153,8 +153,7 @@ def main():
         
         battery_loaders = data_loader.get_battery_loaders()
         
-        # flight_loaders = data_loader.get_flight_loaders()
-        flight_loaders = None
+        flight_loaders = data_loader.get_flight_loaders()
         
         if battery_loaders[0] is None:
             logger.warning("电池数据不可用，跳过电池模型训练")

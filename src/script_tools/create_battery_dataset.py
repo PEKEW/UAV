@@ -53,9 +53,6 @@ def slice_data_into_30s_segments(data_dict, time_column='time_s'):
         current_time = start_time
         segment_id = 0
         
-        # test_max_count = 1000
-        # test_count = 0
-        
         while current_time + window_size <= end_time:
             mask = (time_data >= current_time) & (time_data < current_time + window_size)
             segment_data = df[mask].copy()
@@ -72,9 +69,7 @@ def slice_data_into_30s_segments(data_dict, time_column='time_s'):
                 all_segments.append(segment_info)
                 segment_id += 1
             current_time += window_size
-            # test_count += 1
-            # if test_count >= test_max_count:
-            #     break
+
     print(f"总共生成 {len(all_segments)} 个数据段")
     return all_segments
 

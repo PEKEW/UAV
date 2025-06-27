@@ -20,7 +20,7 @@ class BatteryFeatureExtractor(nn.Module):
         self.input_features = input_features
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Test
+        # Test : 不用进行特征工程 目前的网络性能足够
         return x
         """
         电池特征工程
@@ -125,7 +125,7 @@ class BatteryAnomalyNet(BaseAnomalyModel):
         
         super().__init__(battery_config)
         
-        # Test
+        # Test : 不用进行特征工程 目前的网络性能足够
         self.feature_extractor = BatteryFeatureExtractor(self.input_features)
         # enhanced_features = 14
         enhanced_features = 7

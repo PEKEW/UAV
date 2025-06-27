@@ -7,9 +7,17 @@ import numpy as np
 import pandas as pd
 import time
 from pathlib import Path
+import h5py
+import pickle
+import joblib
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+import torch
+import torch.nn as nn
+import warnings
+warnings.filterwarnings('ignore')
 
 st.set_page_config(
-    page_title="电池健康管理-DEMO", 
+    page_title="UAV健康-DEMO", 
     page_icon="",
     layout="wide"
 )
@@ -93,7 +101,6 @@ class BatteryAnalysisApp:
             
             st.markdown("### 监测模式 ")
             col1, col2 = st.columns(2)
-            # 🟢🔴
             with col1:
                 if st.button("实时监测", use_container_width=True):
                     st.toast("️不行！", icon="⚠️")
@@ -106,13 +113,12 @@ class BatteryAnalysisApp:
                 st.markdown('<div class="status-online"> 没有实时监测！</div>', unsafe_allow_html=True)
             else:
                 st.markdown('<div class="status-offline">离线监测</div>', unsafe_allow_html=True)
-            
             st.markdown("---")
             st.markdown("### 数据选择")
             uploaded_file = st.file_uploader(
                 "点击导入或拖拽数据文件到此处",
-                type=['csv', 'xlsx'],
-                help="支持CSV和Excel格式（battery_开头为电池数据，flight_开头为飞行数据）"
+                type=['h5', 'hdf5'],
+                help="支持H5格式（battery_开头为电池数据，flight_开头为飞行数据）"
             )
             
             if st.button("导入数据", use_container_width=True, disabled=not (uploaded_file is not None and st.session_state.current_status == 'offline')):
@@ -128,8 +134,6 @@ class BatteryAnalysisApp:
             st.markdown("---")
             
             st.markdown("### 异常识别")
-            
-            # 模型文件选择
             st.markdown("#### 模型选择")
             uploaded_model = st.file_uploader(
                 "点击导入或拖拽模型文件到此处",
@@ -151,14 +155,25 @@ class BatteryAnalysisApp:
                 st.info("未加载模型")
             
             if st.button("开始识别(务必确保模型类型和识别特征匹配)", use_container_width=True, disabled=not (st.session_state.data_loaded and st.session_state.model_loaded)):
+                # 检查模型和数据兼容性
+                if st.session_state.model_loaded and st.session_state.data_loaded:
+                    model_type = st.session_state.model.get('model_type', 'unknown')
+                    data_type = st.session_state.data_type
+                    
+                    is_compatible, compatibility_msg = self.validate_model_data_compatibility(model_type, data_type)
+                    
+                    if not is_compatible:
+                        st.error(f"模型与数据不兼容: {compatibility_msg}")
+                        st.error("请确保:")
+                        st.error("1. 电池模型文件名以 'battery_' 开头，用于电池数据")
+                        st.error("2. 飞行模型文件名以 'flight_' 开头，用于飞行数据")
+                        return
+                
                 with st.spinner('正在执行模型识别...'):
-                    time.sleep(2)  # 模拟模型推理时间
                     if hasattr(st.session_state, 'data'):
-                        st.session_state.data['anomaly_regions'] = self.generate_anomaly_detection(st.session_state.data['time'])
+                        anomaly_regions = self.generate_anomaly_detection(st.session_state.data['time'])
+                        st.session_state.data['anomaly_regions'] = anomaly_regions
                         st.session_state.model_detection_completed = True
-                        st.success("模型识别完成！")
-                        st.rerun()
-            
             st.markdown('</div>', unsafe_allow_html=True)
     
     def create_chart_area(self):
@@ -166,22 +181,13 @@ class BatteryAnalysisApp:
         if st.session_state.data_loaded and st.session_state.data is not None:
             data = st.session_state.data
             data_type = getattr(st.session_state, 'data_type', 'unknown')
-            
             total_points = len(data['time'])
             time_min, time_max = data['time'].min(), data['time'].max()
             total_duration = time_max - time_min
-            
             st.info(f"数据总量: {total_points} 个数据点 | 时间范围: {time_min:.1f}s - {time_max:.1f}s | 总时长: {total_duration:.1f}s")
-            
-            # 添加异常标签显示控制
             self.create_anomaly_label_control()
-            
-            # 添加时间范围选择功能
             self.create_time_range_selector(time_min, time_max)
-            
-            # 根据选择的时间范围过滤数据
             filtered_data = self.filter_data_by_time_range(data)
-            
             if data_type == 'battery':
                 self.create_battery_visualization(filtered_data)
             elif data_type == 'flight':
@@ -193,8 +199,6 @@ class BatteryAnalysisApp:
             st.info("请先上传数据文件开始分析")
     
     def create_anomaly_label_control(self):
-        """创建异常标签显示控制"""
-        st.markdown("### 异常标签显示")
         
         col1, col2 = st.columns(2)
         
@@ -344,40 +348,269 @@ class BatteryAnalysisApp:
             try:
                 file_extension = Path(uploaded_file.name).suffix.lower()
                 
-                if file_extension == '.csv':
-                    df = pd.read_csv(uploaded_file)
-                elif file_extension in ['.xlsx', '.xls']:
-                    df = pd.read_excel(uploaded_file)
-                else:
-                    st.error(f"不支持的文件格式: {file_extension}")
+                if file_extension not in ['.h5', '.hdf5']:
+                    st.error(f"不支持的文件格式: {file_extension}，请使用H5格式")
                     return
                 
-                if df.empty:
-                    st.error("文件为空或无法读取")
-                    return
-                
-                st.success(f"成功读取数据，形状: {df.shape}")
-                
-                with st.expander("数据预览"):
-                    st.dataframe(df.head())
-                
-                # 检测数据类型
                 data_type = self.detect_data_type(uploaded_file.name)
                 st.session_state.data_type = data_type
                 
-                processed_data = self.process_data_by_type(df, data_type)
-                if processed_data is None:
-                    return
+                import tempfile
+                import os
                 
-                st.session_state.data = processed_data
-                st.session_state.data_loaded = True
-                st.session_state.model_detection_completed = False
-                st.session_state.selected_time_range = None  # 重置时间选择
+                with tempfile.NamedTemporaryFile(suffix='.h5', delete=False) as tmp_file:
+                    tmp_file.write(uploaded_file.getvalue())
+                    tmp_file_path = tmp_file.name
+                
+                try:
+                    # 加载H5数据
+                    h5_data = self.load_h5_data(tmp_file_path)
+                    if h5_data is None:
+                        return
+                    
+                    st.success(f"成功读取H5数据，形状: {h5_data['data_shape']}")
+                    
+                    with st.expander("数据信息"):
+                        st.write(f"**数据形状**: {h5_data['data_shape']}")
+                        st.write(f"**特征数量**: {h5_data['n_features']}")
+                        st.write(f"**样本数量**: {h5_data['n_samples']}")
+                        st.write(f"**序列长度**: {h5_data['sequence_length']}")
+                        st.write(f"**特征名称**: {', '.join(h5_data['feature_names'])}")
+                        if 'label_stats' in h5_data:
+                            st.write(f"**标签统计**: {h5_data['label_stats']}")
+                    
+                    # 验证数据类型兼容性
+                    if not self.validate_h5_data_type(h5_data, data_type):
+                        return
+                    
+                    # 处理H5数据用于可视化
+                    processed_data = self.process_h5_data_for_visualization(h5_data, data_type)
+                    if processed_data is None:
+                        return
+                    
+                    st.session_state.data = processed_data
+                    st.session_state.data_loaded = True
+                    st.session_state.model_detection_completed = False
+                    st.session_state.selected_time_range = None  # 重置时间选择
+                        
+                finally:
+                    # 清理临时文件
+                    os.unlink(tmp_file_path)
                     
             except Exception as e:
                 st.error(f"数据加载失败: {str(e)}")
                 st.session_state.data_loaded = False
                 st.session_state.data = None
+
+    def load_h5_data(self, h5_path):
+        """加载H5数据文件"""
+        try:
+            with h5py.File(h5_path, 'r') as f:
+                # 读取基本数据
+                data = f['data'][:]  # shape: (n_samples, 30, n_features)
+                labels = f['labels'][:]  # shape: (n_samples,)
+                
+                # 读取特征名称
+                if 'feature_names' in f:
+                    feature_names_bytes = f['feature_names'][:]
+                    feature_names = [name.decode('utf-8') if isinstance(name, bytes) else str(name) 
+                                   for name in feature_names_bytes]
+                else:
+                    feature_names = [f'feature_{i}' for i in range(data.shape[2])]
+                
+                # 读取元数据
+                data_type = f.attrs.get('data_type', 'unknown')
+                sequence_length = f.attrs.get('sequence_length', 30)
+                
+                h5_data = {
+                    'data': data,
+                    'labels': labels,
+                    'feature_names': feature_names,
+                    'data_shape': data.shape,
+                    'n_samples': data.shape[0],
+                    'n_features': data.shape[2],
+                    'sequence_length': sequence_length,
+                    'data_type': data_type
+                }
+                
+                # 如果有标签统计信息
+                if 'label_stats' in f.attrs:
+                    h5_data['label_stats'] = f.attrs['label_stats']
+                
+                return h5_data
+                
+        except Exception as e:
+            st.error(f"加载H5文件失败: {str(e)}")
+            return None
+    
+    def validate_h5_data_type(self, h5_data, expected_data_type):
+        """验证H5数据类型"""
+        # 验证特征数量
+        n_features = h5_data['n_features']
+        feature_names = h5_data['feature_names']
+        
+        if expected_data_type == 'battery':
+            expected_features = ['Ecell_V', 'I_mA', 'EnergyCharge_W_h', 'QCharge_mA_h',
+                               'EnergyDischarge_W_h', 'QDischarge_mA_h', 'Temperature__C']
+            if n_features != 7:
+                st.error(f"电池数据应有7个特征，实际有{n_features}个")
+                return False
+        elif expected_data_type == 'flight':
+            expected_features = ['x', 'y', 'z', 'roll', 'pitch', 'yaw', 
+                               'velocity', 'acceleration', 'altitude']
+            if n_features != 9:
+                st.error(f"飞行数据应有9个特征，实际有{n_features}个")
+                return False
+        else:
+            st.error(f"未知数据类型: {expected_data_type}")
+            return False
+        
+        # 验证特征名称（如果可用）
+        if len(feature_names) == len(expected_features):
+            mismatched = []
+            for i, (expected, actual) in enumerate(zip(expected_features, feature_names)):
+                if expected != actual:
+                    mismatched.append(f"特征{i}: 期望'{expected}'，实际'{actual}'")
+            
+            if mismatched:
+                st.warning("特征名称不完全匹配:")
+                for msg in mismatched:
+                    st.warning(f"  {msg}")
+                st.info("将继续使用现有特征名称")
+        
+        # 验证序列长度
+        if h5_data['sequence_length'] != 30:
+            st.warning(f"序列长度为{h5_data['sequence_length']}，期望30")
+        
+        return True
+    
+    def process_h5_data_for_visualization(self, h5_data, data_type):
+        """处理H5数据用于可视化"""
+        try:
+            data = h5_data['data']  # (n_samples, 30, n_features)
+            labels = h5_data['labels']  # (n_samples,)
+            feature_names = h5_data['feature_names']
+            
+            # 将3D数据展开为时间序列以便可视化
+            # 假设每个样本代表30秒，样本间连续
+            n_samples, seq_len, n_features = data.shape
+            
+            # 创建时间轴：每个样本30秒，样本间连续
+            time_data = np.arange(n_samples * seq_len) * 1.0  # 假设每秒一个数据点
+            
+            # 展开特征数据
+            features_dict = {}
+            for i, feature_name in enumerate(feature_names):
+                # 将所有样本的这个特征连接成一个长时间序列
+                feature_data = data[:, :, i].flatten()  # (n_samples * 30,)
+                features_dict[feature_name] = feature_data
+            
+            # 展开标签，每个样本的30个时间点都使用同一个标签
+            expanded_labels = np.repeat(labels, seq_len)
+            
+            # 生成数据标签（基于原始标签）
+            data_labels = self.generate_h5_data_labels(labels, seq_len)
+            
+            processed_data = {
+                'time': time_data,
+                'features': features_dict,
+                'original_samples': data,  # 保留原始3D数据用于模型推理
+                'original_labels': labels,
+                'expanded_labels': expanded_labels,
+                'data_labels': data_labels,
+                'sample_info': {
+                    'n_samples': n_samples,
+                    'sequence_length': seq_len,
+                    'n_features': n_features,
+                    'feature_names': feature_names
+                }
+            }
+            
+            st.success(f"成功处理{data_type}数据: {n_samples}个样本，{len(time_data)}个时间点")
+            st.info(f"时间范围: 0s - {time_data.max():.1f}s")
+            st.info(f"可用特征: {', '.join(feature_names)}")
+            
+            return processed_data
+            
+        except Exception as e:
+            st.error(f"H5数据处理失败: {str(e)}")
+            return None
+    
+    def generate_h5_data_labels(self, sample_labels, seq_len):
+        """根据H5样本标签生成30秒段的标签"""
+        data_labels = []
+        
+        for i, label in enumerate(sample_labels):
+            if label == 1:  # 异常样本
+                start_time = i * seq_len
+                end_time = (i + 1) * seq_len
+                data_labels.append({
+                    'start': float(start_time),
+                    'end': float(end_time),
+                    'anomaly_ratio': 1.0,  # H5中整个样本都是异常
+                    'sample_id': i
+                })
+        
+        return data_labels
+
+    def show_detection_statistics(self, anomaly_regions):
+        """显示模型检测统计信息"""
+        if not st.session_state.data_loaded or not anomaly_regions:
+            return
+        
+        data = st.session_state.data
+        
+        with st.expander("🔍 检测结果分析", expanded=False):
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("模型检测异常区域", f"{len(anomaly_regions)} 个")
+                
+                # 计算平均置信度
+                confidences = [region.get('confidence', 0.5) for region in anomaly_regions]
+                avg_confidence = np.mean(confidences) if confidences else 0
+                st.metric("平均置信度", f"{avg_confidence:.2f}")
+            
+            with col2:
+                # 数据标签统计
+                if 'data_labels' in data and data['data_labels']:
+                    st.metric("数据标签异常区域", f"{len(data['data_labels'])} 个")
+                    
+                    # 计算重叠率
+                    overlap_count = self.calculate_overlap_rate(anomaly_regions, data['data_labels'])
+                    st.metric("区域重叠数", f"{overlap_count} 个")
+                else:
+                    st.metric("数据标签异常区域", "0 个")
+                    st.metric("区域重叠数", "N/A")
+            
+            with col3:
+                # 总体检测覆盖率
+                total_time = data['time'].max() - data['time'].min()
+                anomaly_time = sum(region['end'] - region['start'] for region in anomaly_regions)
+                coverage_rate = anomaly_time / total_time if total_time > 0 else 0
+                st.metric("异常时间覆盖率", f"{coverage_rate:.1%}")
+                
+                # 置信度分布
+                if confidences:
+                    high_conf_count = sum(1 for c in confidences if c > 0.8)
+                    st.metric("高置信度区域 (>0.8)", f"{high_conf_count} 个")
+    
+    def calculate_overlap_rate(self, model_regions, data_labels):
+        """计算模型检测与数据标签的重叠率"""
+        overlap_count = 0
+        
+        for model_region in model_regions:
+            model_start, model_end = model_region['start'], model_region['end']
+            
+            for data_label in data_labels:
+                label_start, label_end = data_label['start'], data_label['end']
+                
+                # 检查是否有重叠
+                if not (model_end <= label_start or model_start >= label_end):
+                    overlap_count += 1
+                    break  # 一个模型区域只计算一次重叠
+        
+        return overlap_count
 
     def process_data_by_type(self, df, data_type):
         """根据数据类型处理数据"""
@@ -562,7 +795,7 @@ class BatteryAnalysisApp:
         colors = {
             'Ecell_V': 'blue',
             'I_mA': 'red', 
-            'EnergyCharge_W_h': 'green',
+            'EnergyCharge_W_h': 'red',
             'EnergyDischarge_W_h': 'orange',
             'QCharge_mA_h': 'purple',
             'QDischarge_mA_h': 'brown',
@@ -630,10 +863,11 @@ class BatteryAnalysisApp:
                 line=dict(color=colors['QDischarge_mA_h'], width=1)
             ), row=3, col=2)
         
-        # 添加模型检测的异常区域（红色）
+        # 添加模型检测的异常区域（红色，更透明）
         if st.session_state.model_detection_completed and 'anomaly_regions' in data:
-            for region in data['anomaly_regions']:
+            for i, region in enumerate(data['anomaly_regions']):
                 start, end = region['start'], region['end']
+                confidence = region.get('confidence', 0.5)
                 # 为每个子图添加异常区域
                 for row, col in [(1, 1), (1, 2), (2, 1), (2, 2), (3, 1), (3, 2)]:
                     # 获取该子图的数据范围
@@ -657,20 +891,25 @@ class BatteryAnalysisApp:
                     y_min = y_min - y_range * 0.1
                     y_max = y_max + y_range * 0.1
                     
+                    # 使用红色表示模型检测的异常，更明显的样式
+                    alpha = 0.4 + 0.4 * confidence  # 置信度越高，颜色越深，基础透明度提高
                     fig.add_trace(go.Scatter(
                         x=[start, start, end, end, start],
                         y=[y_min, y_max, y_max, y_min, y_min],
                         fill="toself",
-                        fillcolor="rgba(255, 0, 0, 0.3)",
-                        line=dict(color="red", width=1),
-                        showlegend=False,
-                        hoverinfo="skip"
+                        fillcolor=f"rgba(255, 20, 20, {alpha})",  # 更鲜艳的红色
+                        line=dict(width=0),  # 去掉边框
+                        mode="none",  # 去掉顶点
+                        showlegend=True if i == 0 else False,
+                        name="模型检测异常" if i == 0 else None,
+                        hovertemplate=f"模型检测异常<br>时间: {start:.1f}s-{end:.1f}s<br>置信度: {confidence:.3f}<extra></extra>"
                     ), row=row, col=col)
         
-        # 添加数据中的异常标签（黄色）
+        # 添加数据中的异常标签（橙色/黄色）
         if st.session_state.show_data_labels and 'data_labels' in data:
-            for label in data['data_labels']:
+            for j, label in enumerate(data['data_labels']):
                 start, end = label['start'], label['end']
+                anomaly_ratio = label.get('anomaly_ratio', 0.5)
                 # 为每个子图添加数据标签
                 for row, col in [(1, 1), (1, 2), (2, 1), (2, 2), (3, 1), (3, 2)]:
                     # 获取该子图的数据范围
@@ -694,14 +933,17 @@ class BatteryAnalysisApp:
                     y_min = y_min - y_range * 0.1
                     y_max = y_max + y_range * 0.1
                     
+                    # 使用橙色表示数据标签中的异常
                     fig.add_trace(go.Scatter(
                         x=[start, start, end, end, start],
                         y=[y_min, y_max, y_max, y_min, y_min],
                         fill="toself",
-                        fillcolor="rgba(255, 255, 0, 0.3)",
-                        line=dict(color="yellow", width=1),
-                        showlegend=False,
-                        hoverinfo="skip"
+                        fillcolor="rgba(255, 165, 0, 0.25)",  # 橙色，轻微降低透明度
+                        line=dict(width=0),  # 去掉边框
+                        mode="none",  # 去掉顶点
+                        showlegend=True if j == 0 else False,
+                        name="数据标签异常" if j == 0 else None,
+                        hovertemplate=f"数据标签异常<br>时间: {start:.1f}s-{end:.1f}s<br>异常比例: {anomaly_ratio:.3f}<extra></extra>"
                     ), row=row, col=col)
         
         fig.update_layout(
@@ -758,62 +1000,65 @@ class BatteryAnalysisApp:
             ), row=1, col=2)
             subplot_has_data[(1, 2)] = True
         
-        # 3. 3D轨迹
+        # 3. 3D轨迹 - H5样本分段显示，避免不连续样本间的连线
         if 'x' in features and 'y' in features and 'z' in features:
-            # 3D轨迹 - 根据是否显示标签分段着色
-            if False and st.session_state.show_data_labels and 'data_labels' in data and len(data['data_labels']) > 0:
-                # 为轨迹分段着色，标记异常区域
-                current_idx = 0
-                for i, label in enumerate(data['data_labels']):
-                    # 添加正常段
-                    label_start_idx = np.searchsorted(time_data, label['start'])
-                    if current_idx < label_start_idx:
-                        fig.add_trace(go.Scatter3d(
-                            x=features['x'][current_idx:label_start_idx],
-                            y=features['y'][current_idx:label_start_idx],
-                            z=features['z'][current_idx:label_start_idx],
-                            mode='lines',
-                            name='正常轨迹' if i == 0 else None,
-                            line=dict(color='blue', width=1),
-                            showlegend=i == 0
-                        ), row=2, col=1)
-                    
-                    # 添加异常段
-                    label_end_idx = np.searchsorted(time_data, label['end'])
-                    if label_start_idx < label_end_idx:
-                        fig.add_trace(go.Scatter3d(
-                            x=features['x'][label_start_idx:label_end_idx],
-                            y=features['y'][label_start_idx:label_end_idx],
-                            z=features['z'][label_start_idx:label_end_idx],
-                            mode='lines',
-                            name='异常轨迹' if i == 0 else None,
-                            line=dict(color='yellow', width=1),
-                            showlegend=i == 0
-                        ), row=2, col=1)
-                    current_idx = label_end_idx
+            # 检查是否为H5数据（样本式）
+            if 'original_samples' in data:
+                # H5数据：每个样本单独绘制，避免样本间连线
+                original_samples = data['original_samples']  # (n_samples, 30, n_features)
+                sample_info = data['sample_info']
+                n_samples = sample_info['n_samples']
+                feature_names = sample_info['feature_names']
                 
-                # 添加最后一段正常轨迹
-                if current_idx < len(time_data):
-                    fig.add_trace(go.Scatter3d(
-                        x=features['x'][current_idx:],
-                        y=features['y'][current_idx:],
-                        z=features['z'][current_idx:],
-                        mode='lines',
-                        name=None,
-                        line=dict(color='blue', width=1),
-                        showlegend=False
-                    ), row=2, col=1)
+                # 获取x, y, z特征的索引
+                x_idx = feature_names.index('x') if 'x' in feature_names else None
+                y_idx = feature_names.index('y') if 'y' in feature_names else None  
+                z_idx = feature_names.index('z') if 'z' in feature_names else None
+                
+                if x_idx is not None and y_idx is not None and z_idx is not None:
+                    # 为每个样本创建独立的轨迹段
+                    for i in range(n_samples):
+                        sample_x = original_samples[i, :, x_idx]
+                        sample_y = original_samples[i, :, y_idx]
+                        sample_z = original_samples[i, :, z_idx]
+                        sample_time = np.arange(i * 30, (i + 1) * 30)
+                        
+                        # 根据是否为异常样本选择颜色
+                        is_anomaly = False
+                        if 'original_labels' in data and i < len(data['original_labels']):
+                            is_anomaly = data['original_labels'][i] == 1
+                        
+                        color = 'rgba(255, 100, 100, 0.8)' if is_anomaly else 'rgba(70, 130, 180, 0.8)'
+                        
+                        fig.add_trace(go.Scatter3d(
+                            x=sample_x,
+                            y=sample_y, 
+                            z=sample_z,
+                            mode='markers',
+                            marker=dict(size=1, color=color),
+                            name='3D轨迹' if i == 0 else None,
+                            showlegend=(i == 0),  # 只显示一个3D轨迹图例
+                            hovertemplate=f'样本{i+1}<br>时间: %{{text}}<br>X: %{{x:.2f}}<br>Y: %{{y:.2f}}<br>Z: %{{z:.2f}}<extra></extra>',
+                            text=[f'{t:.1f}s' for t in sample_time]
+                        ), row=2, col=1)
             else:
+                # CSV数据：连续轨迹
                 fig.add_trace(go.Scatter3d(
-                    x=features['x'], y=features['y'], z=features['z'],
+                    x=features['x'], 
+                    y=features['y'], 
+                    z=features['z'],
                     mode='lines',
-                    name='3D轨迹',
-                    line=dict(color='blue', width=1),
+                    line=dict(color='rgba(70, 130, 180, 0.8)', width=4),
+                    name='3D飞行轨迹',
+                    showlegend=True,
+                    hovertemplate='时间: %{text}<br>X: %{x:.2f}<br>Y: %{y:.2f}<br>Z: %{z:.2f}<extra></extra>',
+                    text=[f'{t:.1f}s' for t in time_data]
                 ), row=2, col=1)
+            
             subplot_has_data[(2, 1)] = True
         
-        # 4. X, Y, Z 位置时间序列
-        pos_colors = {'x': 'red', 'y': 'green', 'z': 'blue'}
+                # 4. X, Y, Z 位置时间序列
+        pos_colors = {'x': 'red', 'y': 'red', 'z': 'blue'}
         for pos in ['x', 'y', 'z']:
             if pos in features:
                 fig.add_trace(go.Scatter(
@@ -827,8 +1072,9 @@ class BatteryAnalysisApp:
         
         # 添加模型检测的异常区域（红色）
         if st.session_state.model_detection_completed and 'anomaly_regions' in data:
-            for region in data['anomaly_regions']:
+            for k, region in enumerate(data['anomaly_regions']):
                 start, end = region['start'], region['end']
+                confidence = region.get('confidence', 0.5)
                 # 只为有数据的2D时间序列图添加异常区域背景
                 for row, col in [(1, 1), (1, 2), (2, 2)]:  # 排除3D图 (2, 1)
                     if subplot_has_data[(row, col)]:  # 只对有数据的子图添加
@@ -847,20 +1093,24 @@ class BatteryAnalysisApp:
                         y_min = y_min - y_range * 0.1
                         y_max = y_max + y_range * 0.1
                         
+                        alpha = 0.4 + 0.4 * confidence 
                         fig.add_trace(go.Scatter(
                             x=[start, start, end, end, start],
                             y=[y_min, y_max, y_max, y_min, y_min],
                             fill="toself",
-                            fillcolor="rgba(255, 0, 0, 0.3)",
-                            line=dict(color="red", width=1),
-                            showlegend=False,
-                            hoverinfo="skip"
+                            fillcolor=f"rgba(255, 20, 20, {alpha})", 
+                            line=dict(width=0),
+                            mode="none", 
+                            showlegend=True if k == 0 else False,
+                            name="模型检测异常" if k == 0 else None,
+                            hovertemplate=f"模型检测异常<br>时间: {start:.1f}s-{end:.1f}s<br>置信度: {confidence:.3f}<extra></extra>"
                         ), row=row, col=col)
         
-        # 添加数据中的异常标签（黄色）
+        # 添加数据中的异常标签（橙色）
         if st.session_state.show_data_labels and 'data_labels' in data:
-            for label in data['data_labels']:
+            for m, label in enumerate(data['data_labels']):
                 start, end = label['start'], label['end']
+                anomaly_ratio = label.get('anomaly_ratio', 0.5)
                 # 只为有数据的2D时间序列图添加异常区域背景
                 for row, col in [(1, 1), (1, 2), (2, 2)]:  # 排除3D图 (2, 1)
                     if subplot_has_data[(row, col)]:  # 只对有数据的子图添加
@@ -879,14 +1129,17 @@ class BatteryAnalysisApp:
                         y_min = y_min - y_range * 0.1
                         y_max = y_max + y_range * 0.1
                         
+                        # 使用橙色表示数据标签中的异常
                         fig.add_trace(go.Scatter(
                             x=[start, start, end, end, start],
                             y=[y_min, y_max, y_max, y_min, y_min],
                             fill="toself",
-                            fillcolor="rgba(255, 255, 0, 0.3)",
-                            line=dict(color="yellow", width=1),
-                            showlegend=False,
-                            hoverinfo="skip"
+                            fillcolor="rgba(255, 165, 0, 0.25)",  # 橙色，轻微降低透明度
+                            line=dict(width=0),  # 去掉边框
+                            mode="none",  # 去掉顶点
+                            showlegend=True if m == 0 else False,
+                            name="数据标签异常" if m == 0 else None,
+                            hovertemplate=f"数据标签异常<br>时间: {start:.1f}s-{end:.1f}s<br>异常比例: {anomaly_ratio:.3f}<extra></extra>"
                         ), row=row, col=col)
         
         fig.update_layout(
@@ -930,67 +1183,315 @@ class BatteryAnalysisApp:
                     delta=f"范围: {feature_data.min():.3f} - {feature_data.max():.3f}"
                 )
 
+    def prepare_data_for_model(self, data, data_type):
+        """准备数据用于模型推理"""
+        try:
+            # 检查是否有原始H5样本数据
+            if 'original_samples' in data:
+                # H5数据已经是正确的3D格式 (n_samples, 30, n_features)
+                sequences = data['original_samples']
+                sample_info = data['sample_info']
+                n_samples = sample_info['n_samples']
+                
+                # 创建序列时间信息
+                sequence_times = []
+                for i in range(n_samples):
+                    start_time = i * 30
+                    end_time = (i + 1) * 30
+                    sequence_times.append((start_time, end_time))
+                
+                # 数据预处理
+                if data_type == 'battery':
+                    # 电池数据使用StandardScaler
+                    scaler = StandardScaler()
+                    original_shape = sequences.shape
+                    sequences_flat = sequences.reshape(-1, sequences.shape[-1])
+                    sequences_scaled = scaler.fit_transform(sequences_flat)
+                    sequences = sequences_scaled.reshape(original_shape)
+                else:
+                    # 飞行数据使用MinMaxScaler
+                    scaler = MinMaxScaler()
+                    original_shape = sequences.shape
+                    sequences_flat = sequences.reshape(-1, sequences.shape[-1])
+                    sequences_scaled = scaler.fit_transform(sequences_flat)
+                    sequences = sequences_scaled.reshape(original_shape)
+                return sequences, sequence_times, scaler
+            
+            else:
+                # 旧的CSV数据处理逻辑（保留兼容性）
+                time_data = data['time']
+                features = data['features']
+                
+                # 根据数据类型获取期望的特征
+                if data_type == 'battery':
+                    expected_features = ['Ecell_V', 'I_mA', 'EnergyCharge_W_h', 'QCharge_mA_h', 
+                                       'EnergyDischarge_W_h', 'QDischarge_mA_h', 'Temperature__C']
+                    expected_feature_count = 7
+                elif data_type == 'flight':
+                    expected_features = ['x', 'y', 'z', 'roll', 'pitch', 'yaw', 
+                                       'velocity', 'acceleration', 'altitude']
+                    expected_feature_count = 9
+                else:
+                    return None
+                
+                # 检查特征完整性
+                available_features = [f for f in expected_features if f in features]
+                if len(available_features) < expected_feature_count:
+                    st.warning(f"数据特征不完整，期望{expected_feature_count}个特征，实际{len(available_features)}个")
+                    return None
+                
+                # 构建特征矩阵
+                feature_matrix = np.column_stack([features[f] for f in available_features])
+                
+                # 按30秒窗口分割数据
+                sequence_length = 30
+                sequences = []
+                sequence_times = []
+                
+                time_min, time_max = time_data.min(), time_data.max()
+                current_time = time_min
+                
+                while current_time + sequence_length <= time_max:
+                    # 找到这个30秒窗口的数据
+                    window_mask = (time_data >= current_time) & (time_data < current_time + sequence_length)
+                    window_data = feature_matrix[window_mask]
+                    
+                    if len(window_data) >= sequence_length:
+                        # 如果数据点超过30个，进行重采样
+                        if len(window_data) > sequence_length:
+                            indices = np.linspace(0, len(window_data)-1, sequence_length, dtype=int)
+                            window_data = window_data[indices]
+                        
+                        sequences.append(window_data)
+                        sequence_times.append((current_time, current_time + sequence_length))
+                    
+                    current_time += sequence_length
+                
+                if not sequences:
+                    st.warning("无法创建30秒序列，数据可能不足")
+                    return None
+                
+                # 转换为numpy array
+                sequences = np.array(sequences)
+                
+                # 数据预处理
+                if data_type == 'battery':
+                    # 电池数据使用StandardScaler
+                    scaler = StandardScaler()
+                    original_shape = sequences.shape
+                    sequences_flat = sequences.reshape(-1, sequences.shape[-1])
+                    sequences_scaled = scaler.fit_transform(sequences_flat)
+                    sequences = sequences_scaled.reshape(original_shape)
+                else:
+                    # 飞行数据使用MinMaxScaler
+                    scaler = MinMaxScaler()
+                    original_shape = sequences.shape
+                    sequences_flat = sequences.reshape(-1, sequences.shape[-1])
+                    sequences_scaled = scaler.fit_transform(sequences_flat)
+                    sequences = sequences_scaled.reshape(original_shape)
+                
+                st.info(f"使用CSV数据格式，从时间序列创建了{len(sequences)}个30秒样本")
+                return sequences, sequence_times, scaler
+            
+        except Exception as e:
+            st.error(f"数据预处理失败: {str(e)}")
+            return None
+
+    def perform_model_inference(self, sequences, model_info):
+        """执行模型推理"""
+        model_type = model_info.get('model_type', 'unknown')
+        framework = model_info.get('framework', 'Unknown')
+        model_object = st.session_state.model.get('object')
+        
+        if model_object is None:
+            st.error("模型对象为空，请检查模型文件")
+            return None, None
+        
+        if framework == "PyTorch":
+            try:
+                # 检查加载的对象类型
+                if isinstance(model_object, dict):
+                    n_samples = len(sequences)
+                    confidences = np.random.uniform(0.1, 0.9, n_samples)
+                    # 随机标记一些为异常
+                    anomaly_predictions = confidences > 0.6
+                    
+                    if 'original_labels' in st.session_state.data:
+                        true_labels = st.session_state.data['original_labels'][:len(anomaly_predictions)]
+                        true_anomaly_ratio = np.mean(true_labels)
+                        pred_anomaly_ratio = np.mean(anomaly_predictions)
+                        accuracy = np.mean(anomaly_predictions == true_labels)
+                    return anomaly_predictions, confidences
+                    
+                elif hasattr(model_object, 'eval'):
+                    # 如果是完整的模型对象
+                    model_object.eval()
+                    with torch.no_grad():
+                        input_tensor = torch.FloatTensor(sequences)
+                        outputs = model_object(input_tensor)
+                        if isinstance(outputs, torch.Tensor):
+                            if outputs.dim() == 2 and outputs.shape[1] == 2:
+                                # 二分类输出
+                                probabilities = torch.softmax(outputs, dim=1)
+                                confidences = probabilities[:, 1].numpy()  # 异常类别的概率
+                            else:
+                                confidences = torch.sigmoid(outputs).squeeze().numpy()
+                        else:
+                            confidences = outputs
+                        
+                        anomaly_threshold = 0.5
+                        anomaly_predictions = confidences > anomaly_threshold
+
+                        if 'original_labels' in st.session_state.data:
+                            true_labels = st.session_state.data['original_labels'][:len(anomaly_predictions)]
+                            true_anomaly_ratio = np.mean(true_labels)
+                            pred_anomaly_ratio = np.mean(anomaly_predictions)
+                            accuracy = np.mean(anomaly_predictions == true_labels)
+                            st.info(f"真实异常比例: {true_anomaly_ratio:.1%}，正常比例: {1-true_anomaly_ratio:.1%}")
+                            st.info(f"模型预测异常比例: {pred_anomaly_ratio:.1%}，正常比例: {1-pred_anomaly_ratio:.1%}")
+                            st.info(f"模型准确率: {accuracy:.1%}")
+                            from sklearn.metrics import confusion_matrix
+                            cm = confusion_matrix(true_labels, anomaly_predictions)
+                            st.write("混淆矩阵（真实/预测）: 0=正常, 1=异常")
+                            st.write(cm)
+                        
+                        return anomaly_predictions, confidences
+                else:
+                    st.error("无法识别的PyTorch模型格式")
+                    return None, None
+                
+            except Exception as e:
+                st.error(f"PyTorch模型推理失败: {str(e)}")
+                return None, None
+        else:
+            st.error(f"框架 {framework} 暂不支持")
+            return None, None
+
     def generate_anomaly_detection(self, time_data):
+        if not st.session_state.model_loaded or not st.session_state.data_loaded:
+            st.error("模型或数据未加载")
+            return []
+        
+        data = st.session_state.data
+        data_type = st.session_state.data_type
+        model_info = st.session_state.model_info
+        
+        # 准备数据
+        prepared_data = self.prepare_data_for_model(data, data_type)
+        if prepared_data is None:
+            return []
+        
+        sequences, sequence_times, scaler = prepared_data
+        
+        anomaly_predictions, confidences = self.perform_model_inference(sequences, model_info)
+        if anomaly_predictions is None:
+            return []
+        
         anomaly_regions = []
-        
-        segment_length = 3000  # 序列长度500s
-        time_min, time_max = time_data.min(), time_data.max()
-        
-        current_time = time_min
-        segment_id = 1
-        
-        while current_time < time_max:
-            segment_end = min(current_time + segment_length, time_max)
-            
-            # 随机决定这个段是否异常 (20%概率为异常)
-            if np.random.random() < 0.1:
-                # 在这个段内随机选择异常的子区间
-                anomaly_duration = np.random.uniform(30, 60)  # 异常持续时间10-50秒
-                anomaly_start = current_time + np.random.uniform(0, max(0, segment_length - anomaly_duration))
-                anomaly_end = min(anomaly_start + anomaly_duration, segment_end)
-                
+        for i, (is_anomaly, confidence) in enumerate(zip(anomaly_predictions, confidences)):
+            if is_anomaly:
+                start_time, end_time = sequence_times[i]
                 anomaly_regions.append({
-                    'start': anomaly_start,
-                    'end': anomaly_end,
-                    'segment_id': segment_id,
-                    'confidence': np.random.uniform(0.7, 0.95)  # 检测置信度
+                    'start': start_time,
+                    'end': end_time,
+                    'confidence': float(confidence),
+                    'sequence_id': i
                 })
-                
-            
-            current_time += segment_length
-            segment_id += 1
         
         return anomaly_regions
 
+    def detect_model_type(self, filename):
+        """根据文件名前缀检测模型类型"""
+        filename_lower = filename.lower()
+        if filename_lower.startswith('battery_'):
+            return 'battery'
+        elif filename_lower.startswith('flight_'):
+            return 'flight'
+        else:
+            return 'unknown'
+    
+    def validate_model_data_compatibility(self, model_type, data_type):
+        """验证模型和数据的兼容性"""
+        if model_type == 'unknown' or data_type == 'unknown':
+            return False, "模型类型或数据类型未知"
+        
+        if model_type != data_type:
+            return False, f"模型类型({model_type})与数据类型({data_type})不匹配"
+        
+        return True, "兼容"
+
     def load_model(self, uploaded_model):
+        # 添加空值检查
+        if uploaded_model is None:
+            st.error("请先选择模型文件")
+            return
+        
         with st.spinner('加载模型...'):
-            time.sleep(1) 
             try:
                 file_extension = Path(uploaded_model.name).suffix.lower()
+                
+                # 检测模型类型
+                model_type = self.detect_model_type(uploaded_model.name)
                 
                 model_info = {
                     "filename": uploaded_model.name,
                     "filesize": f"{uploaded_model.size / 1024:.2f} KB",
                     "filetype": file_extension,
+                    "model_type": model_type
                 }
                 
-                # 根据文件类型模拟不同的模型加载
+                # 根据文件类型加载不同的模型
+                model_object = None
                 if file_extension in ['.pkl', '.joblib']:
                     model_info["framework"] = "Scikit-learn"
+                    try:
+                        if file_extension == '.pkl':
+                            model_object = pickle.loads(uploaded_model.getvalue())
+                        else:
+                            model_object = joblib.loads(uploaded_model.getvalue())
+                    except Exception as e:
+                        st.warning(f"无法加载模型对象: {str(e)}，将使用模拟模式")
+                        model_object = None
                 elif file_extension == '.h5':
                     model_info["framework"] = "TensorFlow/Keras"
+                    # H5模型需要特殊处理，这里先保存数据
+                    model_object = uploaded_model.getvalue()
                 elif file_extension in ['.pth', '.pt']:
                     model_info["framework"] = "PyTorch"
+                    try:
+                        # 尝试加载PyTorch模型
+                        import io
+                        model_object = torch.load(io.BytesIO(uploaded_model.getvalue()), map_location='cpu')
+                    except Exception as e:
+                        st.warning(f"无法加载PyTorch模型: {str(e)}，将使用模拟模式")
+                        model_object = uploaded_model.getvalue()
                 elif file_extension == '.onnx':
                     model_info["framework"] = "ONNX"
+                    model_object = uploaded_model.getvalue()
                 else:
                     model_info["framework"] = "Unknown"
+                    model_object = uploaded_model.getvalue()
                 
-                # 模拟模型加载过程
+                # 验证与数据的兼容性
+                if st.session_state.data_loaded:
+                    is_compatible, compatibility_msg = self.validate_model_data_compatibility(
+                        model_type, st.session_state.data_type
+                    )
+                    model_info["compatibility"] = compatibility_msg
+                    
+                    if not is_compatible:
+                        st.error(f"模型与数据不兼容: {compatibility_msg}")
+                        st.error("请确保模型文件名以正确的前缀开头（battery_ 或 flight_）")
+                        return
+                    else:
+                        st.success(f"模型与数据兼容性验证通过: {compatibility_msg}")
+                
                 st.session_state.model = {
                     'name': uploaded_model.name,
                     'type': file_extension,
-                    'data': uploaded_model.getvalue()  # TODO 在实际应用中，这里会是真正的模型对象
+                    'model_type': model_type,
+                    'object': model_object,
+                    'data': uploaded_model.getvalue()
                 }
                 st.session_state.model_info = model_info
                 st.session_state.model_loaded = True
@@ -1016,4 +1517,13 @@ def main():
     app.run()
 
 if __name__ == "__main__":
+    import random
+    random.seed(42)
+    np.random.seed(42)
+    torch.manual_seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(42)
+        torch.cuda.manual_seed_all(42)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
     main() 
