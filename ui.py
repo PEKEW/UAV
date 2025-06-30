@@ -1311,20 +1311,86 @@ class BatteryAnalysisApp:
             try:
                 # 检查加载的对象类型
                 if isinstance(model_object, dict):
-                    n_samples = len(sequences)
-                    confidences = np.random.uniform(0.1, 0.9, n_samples)
-                    # 随机标记一些为异常
-                    anomaly_predictions = confidences > 0.6
+                    # 这是一个state dict，需要先初始化模型架构
+                    # st.info(f"{model_object['model_state_dict'].keys()}")
+                    model_object = model_object['model_state_dict']
+                    # 根据模型类型初始化对应的模型架构
+                    if model_type == 'battery':
+                        from src.models.battery_cnn_lstm import BatteryAnomalyNet
+                        # 使用BatteryAnomalyNet的默认配置
+                        config_dict = {
+                            'sequence_length': 30,
+                            'input_features': 7,
+                            'num_classes': 2,
+                            'cnn_channels': [16, 32, 64],
+                            'lstm_hidden': 64,
+                            'attention_heads': 2,
+                            'classifier_hidden': [32],
+                            'dropout_rate': 0.5
+                        }
+                        model = BatteryAnomalyNet(config_dict)
+                    elif model_type == 'flight':
+                        from src.models.flight_cnn_lstm import FlightAnomalyNet
+                        model_dict = {                            'num_classes': 2,
+                            'cnn_channels': [96, 192, 384],
+                            'lstm_hidden': 256,
+                            'attention_heads': 8,
+                            'classifier_hidden': [128, 64]
+                        }
+                        model = FlightAnomalyNet(model_dict)
+                    else:
+                        st.error(f"未知的模型类型: {model_type}")
+                        return None, None
                     
-                    if 'original_labels' in st.session_state.data:
-                        true_labels = st.session_state.data['original_labels'][:len(anomaly_predictions)]
-                        true_anomaly_ratio = np.mean(true_labels)
-                        pred_anomaly_ratio = np.mean(anomaly_predictions)
-                        accuracy = np.mean(anomaly_predictions == true_labels)
-                    return anomaly_predictions, confidences
+                    # 加载state dict
+                    try:
+                        model.load_state_dict(model_object)
+                        st.success(f"成功加载{model_type}模型权重")
+                    except Exception as e:
+                        st.error(f"加载模型权重失败: {str(e)}")
+                        return None, None
                     
+                    # 设置为评估模式
+                    model.eval()
+                    
+                    # 执行推理
+                    with torch.no_grad():
+                        input_tensor = torch.FloatTensor(sequences)
+                        outputs = model(input_tensor)
+                        
+                        if isinstance(outputs, torch.Tensor):
+                            if outputs.dim() == 2 and outputs.shape[1] == 2:
+                                # 二分类输出
+                                probabilities = torch.softmax(outputs, dim=1)
+                                confidences = probabilities[:, 1].numpy()  # 异常类别的概率
+                            else:
+                                confidences = torch.sigmoid(outputs).squeeze().numpy()
+                        else:
+                            confidences = outputs
+                        
+                        anomaly_threshold = 0.5
+                        anomaly_predictions = confidences > anomaly_threshold
+
+                        # 显示模型性能统计
+                        if 'original_labels' in st.session_state.data:
+                            st.info("test")
+                            true_labels = st.session_state.data['original_labels'][:len(anomaly_predictions)]
+                            true_anomaly_ratio = np.mean(true_labels)
+                            pred_anomaly_ratio = np.mean(anomaly_predictions)
+                            accuracy = np.mean(anomaly_predictions == true_labels)
+                            st.info(f"真实异常比例: {true_anomaly_ratio:.1%}，正常比例: {1-true_anomaly_ratio:.1%}")
+                            st.info(f"模型预测异常比例: {pred_anomaly_ratio:.1%}，正常比例: {1-pred_anomaly_ratio:.1%}")
+                            st.info(f"模型准确率: {accuracy:.1%}")
+                            from sklearn.metrics import confusion_matrix
+                            cm = confusion_matrix(true_labels, anomaly_predictions)
+                            st.write("混淆矩阵（真实/预测）: 0=正常, 1=异常")
+                            st.write(cm)
+                        
+                        return anomaly_predictions, confidences
+                        
                 elif hasattr(model_object, 'eval'):
                     # 如果是完整的模型对象
+                    st.info("检测到完整的PyTorch模型对象")
                     model_object.eval()
                     with torch.no_grad():
                         input_tensor = torch.FloatTensor(sequences)
@@ -1357,7 +1423,7 @@ class BatteryAnalysisApp:
                         
                         return anomaly_predictions, confidences
                 else:
-                    st.error("无法识别的PyTorch模型格式")
+                    st.error(f"无法识别的PyTorch模型格式: {type(model_object)}")
                     return None, None
                 
             except Exception as e:

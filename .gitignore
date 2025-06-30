@@ -58,7 +58,5 @@ CLEANUP_CANDIDATES.md
 config_sample.yaml
 config_stable.yaml
 H5_DATASET_README.md
-processed/evtol_anomaly_dataset_3d.h5
-
+*.h5
 bak_ui/
-processed/flight_anomaly_dataset_3d.h5
